@@ -15,42 +15,44 @@ End-to-end demo of a personalized AI service purchase on BNB Chain:
 ## Architecture
 
 ```
-┌─────────────────── LOCAL (buyer machine) ───────────────────────────────┐
-│                                                                           │
-│  UOMP Guard mock (localhost:9374)                                         │
-│   portfolio:holdings (AAPL ×50, NVDA ×20)                                │
-│   profile:risk (moderate / 12mo / RSI MACD Bollinger)                    │
-│            │                                                              │
-│            │ [1] read context                                             │
-│            ▼                                                              │
-│   buyer-client (Node.js)                                                  │
-│            │                                                              │
-│     ┌──────┼──────────────────────────┐                                  │
-│     │      │                          │                                  │
-│  [2] negotiate            [3] on-chain ops          [relay]              │
-│  OAuth2 token             createJob               localhost:9444          │
-│  A2A JSON-RPC             registerJob             Cloudflare Tunnel ──────┼──┐
-│     │                     setBudget                                       │  │
-│     │                     approve + fund ──────────────────────────────── ┼──┼──► BSC Testnet
-│     │                                                                     │  │
-└─────┼─────────────────────────────────────────────────────────────────────┘  │
-      │ [4] notify_funded + tunnel URL + token                                   │
-      ▼                                                                           │
-┌──────────────────────────────────────────────────────────────────────────┐    │
-│  BNB Chain Platform — seller agent (AgentCore runtime)                    │    │
-│                                                                           │    │
-│  negotiate skill ◄── [2] A2A                                             │    │
-│  notify_funded skill ◄── [4] A2A                                         │    │
-│    └─ read UOMP context (holdings, risk)                                  │    │
-│    └─ LLM stock analysis (Kimi moonshot-v1-32k)                          │    │
-│    └─ submit_result ─────────────────────────────────────────────────────┼────┼──► BSC Testnet
-│    └─ POST report ────────────────────────────────────────────────────────┼────┘
-│         → Cloudflare Tunnel → buyer relay (localhost:9444)                │
-└──────────────────────────────────────────────────────────────────────────┘
+  LOCAL (buyer machine)                      CLOUD / CHAIN
+  ──────────────────────                     ─────────────
 
-[5] buyer polls BSC Testnet → job status SUBMITTED
-[6] buyer fetches report via tunnel URL → displayed inline
-[7] buyer settles escrow → U token released to seller (after 24h dispute window)
+  UOMP Guard (localhost:9374)
+  ├─ portfolio: AAPL ×50, NVDA ×20
+  └─ profile:  moderate / 12mo
+        │
+        │ [1] read context
+        ▼
+  buyer-client (Node.js)
+        │
+        ├─[2]─ A2A negotiate ─────────────► seller agent (BNB Chain Platform)
+        │      OAuth2 token                  └─ sign quote → 1.0 U
+        │◄─────────────────────────────────── signed quote
+        │
+        ├─[3]─ createJob ─────────────────► BSC Testnet (chain 97)
+        │      registerJob                   AgenticCommerce
+        │      setBudget                     U token locked in escrow
+        │      approve + fund
+        │
+        ├─ start relay (localhost:9444)
+        │  Cloudflare Tunnel ──────────────► https://xxx.trycloudflare.com
+        │                                          │
+        ├─[4]─ notify_funded ────────────► seller agent
+        │      + tunnel URL + token         ├─ LLM analysis (Kimi)
+        │                                   ├─[5]─ submit_result ─► BSC Testnet
+        │                                   └─[6]─ POST report ───► Cloudflare Tunnel
+        │                                                                 │
+        │◄────────────────────────────────────────────────────────────────┘
+        │      report delivered to local relay
+        │
+        ├─[5]─ poll getJob() ─────────────► BSC Testnet → SUBMITTED
+        │
+        ├─[6]─ fetch report via tunnel URL
+        │      displayed inline
+        │
+        └─[7]─ settle (after 24h) ────────► BSC Testnet
+                                             escrow released to seller
 ```
 
 ## E2E Test Flow
