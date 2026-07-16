@@ -91,62 +91,89 @@ curl -X POST http://localhost:9000/ \
 
 ## Testing
 
-### Unit tests (local, no server needed)
+### Unit tests (no server needed)
 
 ```bash
 cd stockanalyst
 
-# 1. Test analysis engine — fetches real market data from yfinance
-app/agent/.venv/bin/python -c "
-from app.agent.analysis import fetch_quote, fetch_technical_signals
-
-q = fetch_quote('AAPL')
-print(f'Price: {q[\"price\"]}  PE: {q[\"pe_ratio\"]}  Sector: {q[\"sector\"]}')
-
-t = fetch_technical_signals('AAPL')
-print(f'RSI-14: {t[\"rsi_14\"]}  MACD: {t[\"macd\"][\"crossover\"]}')
-print(f'Bollinger position: {t[\"bollinger_20\"][\"position\"]}')
-"
-
-# 2. Test tools load correctly
+# Analysis engine — fetches real market data from yfinance
 app/agent/.venv/bin/python -c "
 import sys; sys.path.insert(0, 'app/agent')
-from tools import LLM_READ_TOOLS
-print([t.name for t in LLM_READ_TOOLS])
-"
-
-# 3. Test prompt builder
-app/agent/.venv/bin/python -c "
-import sys, json; sys.path.insert(0, 'app/agent')
-from seller_core import _build_stock_analysis_prompt
-task = json.dumps({'task': 'Analyze AAPL', 'terms': {'symbols': ['AAPL'], 'analysis_type': 'technical', 'language': 'en'}})
-print(_build_stock_analysis_prompt(task)[:200])
+from analysis import fetch_quote, fetch_technical_signals
+q = fetch_quote('AAPL')
+print(f'Price: {q[\"price\"]}  PE: {q[\"pe_ratio\"]}  Sector: {q[\"sector\"]}')
+t = fetch_technical_signals('AAPL')
+print(f'RSI-14: {t[\"rsi_14\"]}  MACD: {t[\"macd\"][\"crossover\"]}')
 "
 ```
 
-### Integration test (requires running agent)
+### Negotiate test (requires running agent)
 
 ```bash
-# Terminal 1 — start agent
+# Terminal 1
 app/agent/.venv/bin/bag dev
 
-# Terminal 2 — negotiate (get a signed quote)
+# Terminal 2 — get a signed price quote
 curl -s -X POST http://localhost:9000/ \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"role":"user","messageId":"t1","parts":[{"kind":"data","data":{"skill":"negotiate","task_description":"Analyze AAPL","terms":{"symbols":["AAPL"],"analysis_type":"fundamental","language":"en"}}}]}}}' \
-  | python3 -m json.tool
-
-# If negotiate returns a quote, fund on-chain then call notify_funded
-# (see ERC-8183 protocol for the full on-chain flow)
+  -d '{
+    "jsonrpc": "2.0", "id": 1, "method": "message/send",
+    "params": {"message": {"role": "user", "messageId": "t1",
+      "parts": [{"kind": "data", "data": {
+        "skill": "negotiate",
+        "task_description": "Analyze AAPL and NVDA",
+        "terms": {
+          "deliverables": "Comprehensive stock analysis report in Markdown",
+          "quality_standards": "Real market data, RSI-14, MACD, Bollinger Bands"
+        }
+      }}]}}}'
 ```
+
+> **Note:** The agent uses A2A JSON-RPC at `/` — not a REST `/negotiate` endpoint.
+> The `skill` field is required in the data part.
+
+### Full E2E test (on-chain)
+
+`test_e2e.py` runs the complete buyer flow: negotiate → fund on-chain → notify agent → poll → fetch report → settle.
+
+**Prerequisites:**
+- `bag dev` running in another terminal
+- Wallet funded with tBNB (gas) and U tokens on BSC testnet
+- Pieverse LLM credits available (check with `app/agent/.venv/bin/bag llm balance`)
+
+```bash
+# Run from stockanalyst/
+app/agent/.venv/bin/python test_e2e.py
+```
+
+Expected output:
+```
+Step 1: Negotiate       ✓ price=1 U, quote signed
+Step 2: Buy (on-chain)  ✓ Job #N created, fund_tx confirmed
+Step 3: notify_funded   ✓ Agent ACK "delivery started"
+Step 4: Poll status     ... FUNDED → SUBMITTED
+Step 5: Fetch report    --- REPORT (Markdown) ---
+Step 6: Settle          ✓ approve tx confirmed
+```
+
+**Tip — if the LLM hits a daily rate limit** (`auto/free` cap):
+
+```bash
+app/agent/.venv/bin/bag llm topup --amount 1   # charge 1 U from wallet to Pieverse
+```
+
+Then re-run the test. The `auto_renew` hook handles allocation automatically.
+
+> **BSC testnet note:** `test_e2e.py` disables the MegaFuel paymaster, which is
+> unreliable on testnet. Transactions are broadcast directly (self-pay at ~0.1 gwei).
 
 ### CI (automated on every push/PR)
 
 The [CI workflow](.github/workflows/ci.yml) runs automatically on GitHub Actions:
 - Lint: `ruff check` — zero tolerance
-- Analysis engine test: fetches real AAPL data, asserts RSI/MACD/Bollinger are present
-- Tools load test: all 11 LLM tools registered correctly
-- Prompt builder test: structured prompt generation
+- Analysis engine: fetches real AAPL data, asserts RSI/MACD/Bollinger are present
+- Tools load: all LLM tools registered correctly
+- Prompt builder: structured prompt generation verified
 
 ---
 
@@ -299,62 +326,89 @@ curl -X POST http://localhost:9000/ \
 
 ## 测试
 
-### 单元测试（本地，无需启动服务）
+### 单元测试（无需启动服务）
 
 ```bash
 cd stockanalyst
 
-# 1. 测试分析引擎 — 从 yfinance 拉取真实行情数据
-app/agent/.venv/bin/python -c "
-from app.agent.analysis import fetch_quote, fetch_technical_signals
-
-q = fetch_quote('AAPL')
-print(f'价格: {q[\"price\"]}  PE: {q[\"pe_ratio\"]}  板块: {q[\"sector\"]}')
-
-t = fetch_technical_signals('AAPL')
-print(f'RSI-14: {t[\"rsi_14\"]}  MACD: {t[\"macd\"][\"crossover\"]}')
-print(f'布林带位置: {t[\"bollinger_20\"][\"position\"]}')
-"
-
-# 2. 测试工具是否正常加载
+# 分析引擎 — 从 yfinance 拉取真实行情数据
 app/agent/.venv/bin/python -c "
 import sys; sys.path.insert(0, 'app/agent')
-from tools import LLM_READ_TOOLS
-print([t.name for t in LLM_READ_TOOLS])
-"
-
-# 3. 测试提示词构建器
-app/agent/.venv/bin/python -c "
-import sys, json; sys.path.insert(0, 'app/agent')
-from seller_core import _build_stock_analysis_prompt
-task = json.dumps({'task': '分析 AAPL', 'terms': {'symbols': ['AAPL'], 'analysis_type': 'technical', 'language': 'zh'}})
-print(_build_stock_analysis_prompt(task)[:200])
+from analysis import fetch_quote, fetch_technical_signals
+q = fetch_quote('AAPL')
+print(f'价格: {q[\"price\"]}  PE: {q[\"pe_ratio\"]}  板块: {q[\"sector\"]}')
+t = fetch_technical_signals('AAPL')
+print(f'RSI-14: {t[\"rsi_14\"]}  MACD: {t[\"macd\"][\"crossover\"]}')
 "
 ```
 
-### 集成测试（需要先启动 Agent）
+### 报价测试（需要先启动 Agent）
 
 ```bash
-# 终端 1 — 启动 Agent
+# 终端 1
 app/agent/.venv/bin/bag dev
 
-# 终端 2 — 发起报价请求（negotiate）
+# 终端 2 — 获取签名报价
 curl -s -X POST http://localhost:9000/ \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"role":"user","messageId":"t1","parts":[{"kind":"data","data":{"skill":"negotiate","task_description":"分析 AAPL","terms":{"symbols":["AAPL"],"analysis_type":"fundamental","language":"zh"}}}]}}}' \
-  | python3 -m json.tool
-
-# negotiate 返回签名报价后，链上打款，再调用 notify_funded
-# （完整链上流程见 ERC-8183 协议文档）
+  -d '{
+    "jsonrpc": "2.0", "id": 1, "method": "message/send",
+    "params": {"message": {"role": "user", "messageId": "t1",
+      "parts": [{"kind": "data", "data": {
+        "skill": "negotiate",
+        "task_description": "分析 AAPL 和 NVDA",
+        "terms": {
+          "deliverables": "Markdown 格式股票分析报告",
+          "quality_standards": "真实行情数据，包含 RSI-14、MACD、布林带"
+        }
+      }}]}}}'
 ```
+
+> **注意：** Agent 使用 A2A JSON-RPC 协议，接口为 `/`（非 REST `/negotiate`）。
+> 请求的数据部分必须包含 `skill` 字段。
+
+### 完整链上 E2E 测试
+
+`test_e2e.py` 覆盖完整买家流程：报价协商 → 链上资助 → 通知 Agent → 轮询 → 获取报告 → 结算。
+
+**前置条件：**
+- 另一个终端中已运行 `bag dev`
+- 钱包已充值 tBNB（Gas）和 BSC 测试网 U token
+- Pieverse LLM 有可用余额（用 `app/agent/.venv/bin/bag llm balance` 检查）
+
+```bash
+# 在 stockanalyst/ 目录下运行
+app/agent/.venv/bin/python test_e2e.py
+```
+
+预期输出：
+```
+Step 1: Negotiate       ✓ price=1 U，报价已签名
+Step 2: Buy (链上)      ✓ Job #N 创建并资助成功，fund_tx 已确认
+Step 3: notify_funded   ✓ Agent ACK "delivery started"
+Step 4: 轮询状态        ... FUNDED → SUBMITTED
+Step 5: 获取报告        --- 完整 Markdown 分析报告 ---
+Step 6: 结算            ✓ approve tx 已确认
+```
+
+**LLM 达到每日免费限额时（`auto/free` 每日上限）：**
+
+```bash
+app/agent/.venv/bin/bag llm topup --amount 1   # 从钱包向 Pieverse 充值 1 U
+```
+
+充值后重新运行测试，`auto_renew` 钩子会自动完成分配。
+
+> **BSC 测试网说明：** `test_e2e.py` 已禁用 MegaFuel Paymaster（测试网上不稳定），
+> 改用直接广播（自付 Gas，约 0.1 gwei）。
 
 ### CI 自动测试
 
 [CI Workflow](.github/workflows/ci.yml) 在每次 Push / PR 时自动运行：
 - 代码检查：`ruff check` — 零容忍
-- 分析引擎测试：拉取真实 AAPL 数据，验证 RSI/MACD/布林带
-- 工具加载测试：11 个 LLM 工具全部注册成功
-- 提示词构建器测试：结构化提示词生成验证
+- 分析引擎：拉取真实 AAPL 数据，验证 RSI/MACD/布林带
+- 工具加载：所有 LLM 工具注册正确
+- 提示词构建器：结构化提示词生成验证
 
 ---
 
