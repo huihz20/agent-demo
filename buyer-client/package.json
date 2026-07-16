@@ -1,0 +1,20 @@
+{
+  "name": "buyer-client",
+  "version": "1.0.0",
+  "description": "ERC-8183 buyer client with UOMP user context layer",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node --env-file=.env dist/index.js",
+    "dev": "npx tsx --env-file=.env src/index.ts"
+  },
+  "dependencies": {
+    "ethers": "^6.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

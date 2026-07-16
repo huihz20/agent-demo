@@ -1,0 +1,184 @@
+/**
+ * UOMP payload relay — buyer-side reverse gateway.
+ *
+ * Starts a local HTTP server that stores deliverable payloads in memory,
+ * then exposes it publicly via a Cloudflare Tunnel (reverse tunnel).
+ *
+ * The seller uploads the report to the public tunnel URL and gets back a
+ * payload_id. That URL is stored on-chain. The buyer (and anyone else with
+ * the tunnel URL) can download the payload by ID — no direct seller→buyer
+ * connection needed, and the buyer has no public IP requirement.
+ *
+ * Endpoints:
+ *   POST /v1/payload/upload   Bearer <token>   → { payload_id }
+ *   GET  /v1/payload/:id      (no auth)        → raw bytes
+ *   GET  /v1/health           (no auth)        → { status, payloads }
+ */
+
+import { createServer, type IncomingMessage, type ServerResponse } from "http";
+import { spawn, type ChildProcess } from "child_process";
+import { randomBytes } from "crypto";
+
+export interface GatewayRelay {
+  localUrl: string;    // http://127.0.0.1:PORT  (for buyer's own fetch)
+  publicUrl: string;   // https://xxx.trycloudflare.com  (for seller to upload)
+  token: string;       // Bearer token seller must include on upload
+  close(): void;
+}
+
+// In-memory payload store — scoped to this process lifetime.
+const payloads = new Map<string, Buffer>();
+
+function handleRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  token: string,
+): void {
+  const { method, url = "/" } = req;
+
+  // ── Health (no auth) ───────────────────────────────────────────────────────
+  if (method === "GET" && url === "/v1/health") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "ok", payloads: payloads.size }));
+    return;
+  }
+
+  // ── Upload (requires Bearer token) ────────────────────────────────────────
+  if (method === "POST" && url === "/v1/payload/upload") {
+    const auth = req.headers["authorization"] ?? "";
+    if (!auth.startsWith("Bearer ") || auth.slice(7) !== token) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { code: "UNAUTHORIZED", message: "Invalid or missing Bearer token" } }));
+      return;
+    }
+
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      const id = `pay_${Date.now()}_${randomBytes(4).toString("hex")}`;
+      const data = Buffer.concat(chunks);
+      payloads.set(id, data);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ payload_id: id, size: data.byteLength }));
+    });
+    return;
+  }
+
+  // ── Download (no auth — payload_id is unguessable) ─────────────────────────
+  const getMatch = url.match(/^\/v1\/payload\/([^/]+)$/);
+  if (method === "GET" && getMatch) {
+    const id = decodeURIComponent(getMatch[1]);
+    const data = payloads.get(id);
+    if (!data) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { code: "NOT_FOUND", message: `Payload ${id} not found` } }));
+      return;
+    }
+    res.writeHead(200, {
+      "Content-Type": "application/octet-stream",
+      "Content-Length": String(data.byteLength),
+    });
+    res.end(data);
+    return;
+  }
+
+  res.writeHead(404);
+  res.end();
+}
+
+function createRelayServer(port: number, token: string): Promise<() => void> {
+  return new Promise((resolve, reject) => {
+    const server = createServer((req, res) => handleRequest(req, res, token));
+    server.listen(port, "127.0.0.1", () => resolve(() => server.close()));
+    server.on("error", reject);
+  });
+}
+
+function findCloudflared(): string {
+  const candidates = [
+    "cloudflared",
+    `${process.env["HOME"]}/.local/bin/cloudflared`,
+    "/usr/local/bin/cloudflared",
+    "/opt/homebrew/bin/cloudflared",
+  ];
+  // Return first match — on PATH we can't stat, so just return the first name
+  // and let spawn fail if not found.
+  return candidates[0] ?? "cloudflared";
+}
+
+function startCloudflaredTunnel(localPort: number): Promise<{ url: string; proc: ChildProcess }> {
+  return new Promise((resolve, reject) => {
+    const bin = findCloudflared();
+    const proc = spawn(bin, ["tunnel", "--url", `http://127.0.0.1:${localPort}`], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let settled = false;
+
+    const tryExtract = (text: string) => {
+      const m = text.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+      if (m && !settled) {
+        settled = true;
+        resolve({ url: m[0], proc });
+      }
+    };
+
+    proc.stdout?.on("data", (d: Buffer) => tryExtract(d.toString()));
+    proc.stderr?.on("data", (d: Buffer) => tryExtract(d.toString()));
+
+    proc.on("error", (err: Error) => {
+      if (!settled) { settled = true; reject(err); }
+    });
+    proc.on("exit", (code: number | null) => {
+      if (!settled) { settled = true; reject(new Error(`cloudflared exited with code ${code}`)); }
+    });
+
+    setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        proc.kill();
+        reject(new Error("cloudflared tunnel timed out (20s). Install: https://github.com/cloudflare/cloudflared/releases"));
+      }
+    }, 20_000);
+  });
+}
+
+/**
+ * Start the UOMP payload relay and (optionally) a Cloudflare Tunnel.
+ *
+ * Returns the local URL for the buyer's own fetch calls, the public tunnel
+ * URL to pass to the seller, and a Bearer token the seller must send on
+ * upload requests.
+ */
+export async function startGatewayRelay(port = 9444): Promise<GatewayRelay> {
+  const token = `gw-${randomBytes(16).toString("hex")}`;
+  const closeServer = await createRelayServer(port, token);
+  const localUrl = `http://127.0.0.1:${port}`;
+
+  console.log(`  Relay started at ${localUrl}`);
+  console.log("  Starting Cloudflare Tunnel...");
+
+  let publicUrl = localUrl;
+  let tunnelProc: ChildProcess | undefined;
+
+  try {
+    const { url, proc } = await startCloudflaredTunnel(port);
+    publicUrl = url;
+    tunnelProc = proc;
+    console.log(`  Tunnel URL: ${publicUrl}`);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(`  ⚠  Cloudflare Tunnel unavailable: ${msg}`);
+    console.log("  Falling back to local-only relay (seller must be on same machine).");
+  }
+
+  return {
+    localUrl,
+    publicUrl,
+    token,
+    close() {
+      closeServer();
+      tunnelProc?.kill();
+    },
+  };
+}

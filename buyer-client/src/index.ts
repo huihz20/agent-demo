@@ -1,0 +1,237 @@
+#!/usr/bin/env node
+/**
+ * ERC-8183 buyer client — uses UOMP user context to drive the full commerce flow.
+ *
+ * UOMP (User-Owned Memory Protocol) provides the user's portfolio preferences.
+ * ERC-8183 (AgenticCommerce) handles the on-chain escrow and payment release.
+ *
+ * Flow:
+ *   1. Load portfolio context from UOMP memory store
+ *   2. A2A negotiate  — get signed price quote from agent
+ *   3. On-chain buy   — createJob → registerJob → setBudget → approve → fund
+ *   4. notify_funded  — tell agent to start LLM work
+ *   5. Poll chain     — wait for SUBMITTED status
+ *   6. Fetch report   — download deliverable from IPFS/storage
+ *   7. Settle         — approve job, release escrow to seller
+ *
+ * Setup:
+ *   cp .env.example .env
+ *   # Edit .env: set KEYSTORE_PATH, WALLET_PASSWORD, AGENT_ENDPOINT
+ *   npm install
+ *   npm run dev
+ */
+
+import { readFileSync } from "fs";
+import { resolve } from "path";
+import { Wallet, type BaseWallet } from "ethers";
+import { GuardUserMemory, buildTaskFromMemory } from "./uomp.js";
+import { negotiate, buildJobDescription, notifyFunded } from "./negotiate.js";
+import { ERC8183Buyer } from "./erc8183.js";
+import { startGatewayRelay, type GatewayRelay } from "./gateway.js";
+
+// ── Config from environment ──────────────────────────────────────────────────
+const KEYSTORE_PATH  = process.env["KEYSTORE_PATH"]  ?? "../stockanalyst/.studio/wallets/0x1FF095E1C5Cf4bC72a3DC54be17B6cf85043Fb67.json";
+const WALLET_PASSWORD = process.env["WALLET_PASSWORD"] ?? "";
+const AGENT_ENDPOINT  = process.env["AGENT_ENDPOINT"]  ?? "http://localhost:9000";
+const PROVIDER_ADDRESS = process.env["PROVIDER_ADDRESS"] ?? "0x1FF095E1C5Cf4bC72a3DC54be17B6cf85043Fb67";
+
+const POLL_INTERVAL_MS = 15_000;
+const POLL_TIMEOUT_MS  = 1_800_000;
+
+// Module-level relay handle so the process-exit handler can always close it.
+let relay: GatewayRelay | undefined;
+
+function hr(label: string): void {
+  console.log(`\n${"─".repeat(60)}`);
+  console.log(`  ${label}`);
+  console.log("─".repeat(60));
+}
+
+function banner(lines: string[]): void {
+  console.log("\n" + "═".repeat(60));
+  for (const l of lines) console.log(`  ${l}`);
+  console.log("═".repeat(60));
+}
+
+async function main(): Promise<void> {
+  // ── Load wallet from encrypted keystore ─────────────────────────────────
+  if (!WALLET_PASSWORD) {
+    console.error("ERROR: WALLET_PASSWORD is required. Set it in .env");
+    process.exit(1);
+  }
+
+  const keystorePath = resolve(import.meta.dirname, "..", KEYSTORE_PATH);
+  const keystoreJson = readFileSync(keystorePath, "utf8");
+  console.log("Decrypting keystore...");
+  const wallet = await Wallet.fromEncryptedJson(keystoreJson, WALLET_PASSWORD) as BaseWallet;
+
+  const buyer = new ERC8183Buyer(wallet);
+
+  // ── Start UOMP payload relay (reverse gateway for report delivery) ────────
+  // The seller uploads the report here; Cloudflare Tunnel exposes it publicly
+  // so the seller can reach it even when the buyer has no public IP.
+  hr("UOMP Gateway: starting payload relay + Cloudflare Tunnel");
+  try {
+    relay = await startGatewayRelay();
+    console.log(`  publicUrl:   ${relay.publicUrl}`);
+    console.log(`  localUrl:    ${relay.localUrl}`);
+  } catch (err: unknown) {
+    console.log(`  ⚠  Failed to start relay: ${err instanceof Error ? err.message : err}`);
+    console.log("  Continuing without UOMP delivery (seller will use local storage).");
+  }
+
+  // ── Step 0: Pre-flight balance check ────────────────────────────────────
+  const tBnb = await buyer.tBnbBalance();
+  const uBal = await buyer.uBalance();
+
+  banner([
+    "Stock Analysis Agent — UOMP Buyer Client",
+    `Agent:    ${AGENT_ENDPOINT}`,
+    `Provider: ${PROVIDER_ADDRESS}`,
+    `Buyer:    ${buyer.address}`,
+    `Balance:  ${Number(tBnb).toFixed(4)} tBNB  |  ${Number(uBal).toFixed(4)} U`,
+    "Network:  BSC Testnet (chain 97)",
+  ]);
+
+  if (Number(tBnb) < 0.001) {
+    console.error("ERROR: Insufficient tBNB for gas. Faucet: https://testnet.bnbchain.org/faucet-smart");
+    process.exit(1);
+  }
+  if (Number(uBal) < 1) {
+    console.error("ERROR: Insufficient U balance (need ≥ 1 U). Faucet: https://united-coin-u.github.io/u-faucet/");
+    process.exit(1);
+  }
+
+  // ── Step 1: Load UOMP portfolio context ─────────────────────────────────
+  hr("Step 1: Load UOMP user context (portfolio + risk profile)");
+  const guardUrl = process.env["UOMP_GUARD_URL"] ?? "http://127.0.0.1:9374";
+  const memory = new GuardUserMemory();
+
+  const { symbols, task, deliverables, quality } = await buildTaskFromMemory(memory);
+  console.log(`  ✓ Symbols:     ${symbols.join(", ")}`);
+  console.log(`  ✓ Task:        ${task}`);
+  console.log(`  ✓ Source:      UOMP Guard at ${guardUrl}`);
+
+  // ── Step 2: Negotiate ────────────────────────────────────────────────────
+  hr("Step 2: Negotiate — get signed price quote from agent");
+  const envelope = await negotiate(AGENT_ENDPOINT, task, deliverables, quality);
+  const priceRaw = BigInt(envelope.response.terms.price);
+  const priceU   = Number(priceRaw) / 1e18;
+  console.log(`  ✓ Accepted     price=${priceU} U`);
+  console.log(`  ✓ Estimated    completion=${envelope.response.estimated_completion_seconds}s`);
+  const hash = (envelope.negotiation_hash ?? envelope.response.negotiation_hash ?? "").slice(0, 22);
+  console.log(`  ✓ Quote hash   ${hash}...`);
+
+  const description = buildJobDescription(envelope);
+
+  // ── Step 3: On-chain buy ─────────────────────────────────────────────────
+  hr("Step 3: On-chain — createJob → registerJob → setBudget → approve → fund");
+  const buy = await buyer.buy({
+    provider: PROVIDER_ADDRESS,
+    description,
+    budgetU: String(priceU),
+  });
+
+  console.log(`\n  ✓ Job ID       ${buy.jobId}`);
+  console.log(`  ✓ create_tx    ${buy.createTx}`);
+  console.log(`  ✓ fund_tx      ${buy.fundTx}`);
+  console.log(`  ✓ budget       ${buy.budgetU} U`);
+
+  // ── Step 4: notify_funded ────────────────────────────────────────────────
+  hr(`Step 4: notify_funded — tell agent job #${buy.jobId} is funded`);
+  const notifyStatus = await notifyFunded(AGENT_ENDPOINT, buy.jobId, {
+    gatewayUrl: relay?.publicUrl,
+    gatewayToken: relay?.token,
+  });
+  if (relay) {
+    console.log(`  ✓ Gateway URL  ${relay.publicUrl}`);
+  }
+  console.log(`  ✓ Agent ACK    status=${notifyStatus}`);
+
+  // ── Step 5: Poll for SUBMITTED ───────────────────────────────────────────
+  hr(`Step 5: Poll on-chain until job #${buy.jobId} reaches SUBMITTED`);
+  const finalStatus = await buyer.pollUntilSubmitted(buy.jobId, {
+    intervalMs: POLL_INTERVAL_MS,
+    timeoutMs:  POLL_TIMEOUT_MS,
+  });
+  console.log(`  ✓ Job reached  ${finalStatus}`);
+
+  // ── Step 6: Fetch deliverable ────────────────────────────────────────────
+  hr("Step 6: Fetch deliverable URL from chain");
+  const deliverableUrl = await buyer.getDeliverableUrl(buy.jobId, buy.fundTxBlock);
+  if (deliverableUrl) {
+    console.log(`  ✓ Deliverable URL: ${deliverableUrl}`);
+    if (deliverableUrl.startsWith("http")) {
+      console.log("  Fetching report content...");
+      try {
+        // The buyer's relay is still running — we can fetch via the public tunnel URL.
+        // If the seller is on the same machine (no tunnel), localUrl and publicUrl are
+        // identical so this fetch goes straight to localhost.
+        const resp = await fetch(deliverableUrl);
+        if (resp.ok) {
+          // The UOMP gateway stores the full DeliverableManifest JSON.
+          // Extract response.content (the actual report) when present;
+          // fall back to displaying the raw text for other storage backends.
+          let reportText: string;
+          const rawText = await resp.text();
+          try {
+            const manifest = JSON.parse(rawText) as {
+              response?: { content?: string };
+              [key: string]: unknown;
+            };
+            reportText = manifest.response?.content ?? rawText;
+          } catch {
+            reportText = rawText;
+          }
+          console.log("\n┌─ REPORT " + "─".repeat(50) + "┐");
+          for (const line of reportText.split("\n")) {
+            console.log("│ " + line);
+          }
+          console.log("└" + "─".repeat(52) + "┘");
+        } else {
+          console.log(`  (HTTP ${resp.status} fetching report — check URL manually)`);
+        }
+      } catch (err) {
+        console.log(`  (Could not fetch report: ${err})`);
+      }
+    } else {
+      console.log(`  (Non-HTTP URL — fetch manually: ${deliverableUrl})`);
+    }
+  } else {
+    console.log("  (Deliverable URL not found in Policy events — job may not be submitted yet)");
+  }
+
+  // ── Step 7: Settle ───────────────────────────────────────────────────────
+  hr("Step 7: Settle — approve job, release escrow to seller");
+  try {
+    const settleTx = await buyer.settle(buy.jobId);
+    console.log(`  ✓ settle_tx    ${settleTx}`);
+    banner([
+      `✓ E2E PASSED — job #${buy.jobId} settled on BSC testnet`,
+      `  Seller received: ${priceU} U`,
+    ]);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // 0x17be5b7b = DisputeWindowActive — settle requires waiting 24h after submission
+    if (msg.includes("17be5b7b") || msg.includes("DisputeWindow")) {
+      console.log("  ⚠  Dispute window still active (24h on BSC testnet).");
+      console.log("     Run settle manually after the window elapses:");
+      console.log(`     bag erc8183 settle ${buy.jobId}`);
+      banner([
+        `✓ E2E PASSED — job #${buy.jobId} SUBMITTED (settle pending dispute window)`,
+        `  Run: bag erc8183 settle ${buy.jobId}  (available after ~24h)`,
+      ]);
+    } else {
+      throw err;
+    }
+  }
+}
+
+main()
+  .catch((err: Error) => {
+    console.error("\n✗ FAILED:", err.message);
+    process.exit(1);
+  })
+  .finally(() => {
+    relay?.close();
+  });
