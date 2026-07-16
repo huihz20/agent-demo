@@ -1,0 +1,96 @@
+[project]
+name = "stockanalyst-agent"
+
+[stack]
+# Project-lifetime facts: which framework / runtime adapter recipes this
+# Agent was scaffolded against. doctor / dev / deploy read these to know
+# what to check, load, and route. framework: adk; runtime: agentcore | azure-foundry.
+framework = "adk"
+runtime = "agentcore"
+# External protocol this runtime serves (one runtime, one signer):
+#   A2A — serve_a2a: agent card + negotiate/notify_funded skills.
+#   MCP — FastMCP on /mcp: negotiate (signed quote) + notify_funded (verify →
+#         deliver → submit, synchronously within the tool call) + read-only chain
+#         tools. MCP delivery runs in-call (≤ ~15 min); the runtime is stateful.
+protocol = "A2A"
+
+[network]
+default = "bsc-testnet"
+
+[deploy]
+# Deploy destination (orthogonal to [stack].runtime). 'platform' deploys
+# through the BNB Chain managed platform as a 48h TESTNET TRIAL sandbox
+# (auto-reclaimed at 48h), not a production seller. `bag deploy` dispatches
+# on this; it records [deploy.platform] (slug/deployment_id/invoke_url)
+# post-deploy. Absent ⇒ self (deploy to your own cloud via [stack].runtime).
+destination = "platform"
+# Artifact channel: 'zip' (evm-local default — managed runtime, no Docker)
+# or 'container' (local Docker build → brokered ECR; forced for twak).
+platform_artifact = "zip"
+
+[wallet]
+# Local keystore signer. The Agent is the SOLE key-holder/signer.
+# The keystore lives at the WORKSPACE root — outside app/agent (the AgentCore
+# codeLocation) — so no packaging path can bundle it into a deploy artifact.
+kind = "evm-local"
+signer = "local"
+keystore_dir = "../../.studio/wallets"
+# address = "0x..."   # filled by `bag wallet new`
+address = "0x1FF095E1C5Cf4bC72a3DC54be17B6cf85043Fb67"
+
+[llm]
+provider = "pieverse-llm"
+model = "auto/free"
+
+[llm.pieverse]
+# Pieverse topup runs ONLY on BSC mainnet (chainId=56); decoupled from [network].default.
+network = "bsc-mainnet"
+# key_hash = "..."        # written by `bag llm activate`
+# zero-deposit default. `bag llm activate` creates the key with $0
+# allocation; switch to a paid model + `bag llm topup` only when you need it.
+initial_allocation_usd = 0
+key_hash = "4e900e64aed7ac67192eddf7c06f27c53934f099eadee16ed934bf4980985322"
+
+[llm.auto_renew]
+# (v0.0.1): hook auto-allocates from Pieverse Account Balance to the
+# API key when Key Credit < min_balance_usd. Account Balance is NEVER refilled
+# automatically from your wallet UNLESS you opt in via `bag budget enable`
+# — defaults below stay in allocate-only mode. This
+# automatic `load_model()` hook IS the agent's LLM-credit self-top-up (NOT an
+# LLM-callable tool).
+enabled = true            # set false to opt out of in-process auto-allocate
+min_balance_usd = 0.01    # Key Credit threshold that triggers allocate
+topup_chunk_usd = 1.0     # chunk pulled from Account Balance per allocate
+max_topup_per_day_usd = 3.0   # opt-in cap; only enforced when `bag budget enable` is on
+check_interval_seconds = 60
+
+[payments.erc8183]
+# Read by the Agent: it quotes the FIXED `price`, CLAMPS it to [min,max],
+# freezes a short-TTL offer, and EIP-191 signs it — pricing is rule-based, the
+# LLM never prices.
+currency = "0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565"   # $U token address — prefilled from [network].default
+price = "1000000000000000000"                  # wei — 1.0 U per analysis
+min_price = "500000000000000000"               # wei — 0.5 U floor
+max_price = "5000000000000000000"              # wei — 5.0 U ceiling
+quote_ttl_seconds = 900                        # seconds a signed quote stays valid; SDK caps at 900 (~15min work window)
+default_estimated_completion_seconds = 600
+poll_interval_seconds = 30
+auto_settle = false                            # opt-in: detect dispute-window-elapsed → settle
+
+[storage]
+# Deliverables pinned to IPFS. upload() returns ipfs://CID, published
+# on-chain verbatim — durable, public, deploy-ready. Works with any
+# pinning service or self-hosted node: the upload endpoint is
+# STORAGE_API_URL and the write key/JWT is STORAGE_API_KEY, both in
+# .studio/.env.local.
+kind = "local"
+
+
+[payments.x402]
+# Optional: PIN the trusted Pieverse pay-to address. Leave empty — `bag llm
+# topup` / auto-topup auto-discover it from the hardcoded, SIWE-authenticated
+# topup endpoint (validated chain + U asset). Set a value only to pin a
+# specific recipient; the generic x402 buyer still never trusts an un-pinned
+# payTo from an arbitrary URL.
+expected_recipient = ""
+allowed_hosts = ["llm.pieverse.io"]
