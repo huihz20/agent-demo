@@ -89,6 +89,67 @@ curl -X POST http://localhost:9000/ \
 
 ---
 
+## Testing
+
+### Unit tests (local, no server needed)
+
+```bash
+cd stockanalyst
+
+# 1. Test analysis engine — fetches real market data from yfinance
+app/agent/.venv/bin/python -c "
+from app.agent.analysis import fetch_quote, fetch_technical_signals
+
+q = fetch_quote('AAPL')
+print(f'Price: {q[\"price\"]}  PE: {q[\"pe_ratio\"]}  Sector: {q[\"sector\"]}')
+
+t = fetch_technical_signals('AAPL')
+print(f'RSI-14: {t[\"rsi_14\"]}  MACD: {t[\"macd\"][\"crossover\"]}')
+print(f'Bollinger position: {t[\"bollinger_20\"][\"position\"]}')
+"
+
+# 2. Test tools load correctly
+app/agent/.venv/bin/python -c "
+import sys; sys.path.insert(0, 'app/agent')
+from tools import LLM_READ_TOOLS
+print([t.name for t in LLM_READ_TOOLS])
+"
+
+# 3. Test prompt builder
+app/agent/.venv/bin/python -c "
+import sys, json; sys.path.insert(0, 'app/agent')
+from seller_core import _build_stock_analysis_prompt
+task = json.dumps({'task': 'Analyze AAPL', 'terms': {'symbols': ['AAPL'], 'analysis_type': 'technical', 'language': 'en'}})
+print(_build_stock_analysis_prompt(task)[:200])
+"
+```
+
+### Integration test (requires running agent)
+
+```bash
+# Terminal 1 — start agent
+app/agent/.venv/bin/bag dev
+
+# Terminal 2 — negotiate (get a signed quote)
+curl -s -X POST http://localhost:9000/ \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"role":"user","messageId":"t1","parts":[{"kind":"data","data":{"skill":"negotiate","task_description":"Analyze AAPL","terms":{"symbols":["AAPL"],"analysis_type":"fundamental","language":"en"}}}]}}}' \
+  | python3 -m json.tool
+
+# If negotiate returns a quote, fund on-chain then call notify_funded
+# (see ERC-8183 protocol for the full on-chain flow)
+```
+
+### CI (automated on every push/PR)
+
+The [CI workflow](.github/workflows/ci.yml) runs automatically on GitHub Actions:
+- Lint: `ruff check` — zero tolerance
+- Analysis engine test: fetches real AAPL data, asserts RSI/MACD/Bollinger are present
+- Tools load test: all 11 LLM tools registered correctly
+- Prompt builder test: structured prompt generation
+
+---
+
 ## Project Structure
 
 ```
@@ -233,6 +294,67 @@ curl -X POST http://localhost:9000/ \
   "language": "zh"                        # en | zh
 }
 ```
+
+---
+
+## 测试
+
+### 单元测试（本地，无需启动服务）
+
+```bash
+cd stockanalyst
+
+# 1. 测试分析引擎 — 从 yfinance 拉取真实行情数据
+app/agent/.venv/bin/python -c "
+from app.agent.analysis import fetch_quote, fetch_technical_signals
+
+q = fetch_quote('AAPL')
+print(f'价格: {q[\"price\"]}  PE: {q[\"pe_ratio\"]}  板块: {q[\"sector\"]}')
+
+t = fetch_technical_signals('AAPL')
+print(f'RSI-14: {t[\"rsi_14\"]}  MACD: {t[\"macd\"][\"crossover\"]}')
+print(f'布林带位置: {t[\"bollinger_20\"][\"position\"]}')
+"
+
+# 2. 测试工具是否正常加载
+app/agent/.venv/bin/python -c "
+import sys; sys.path.insert(0, 'app/agent')
+from tools import LLM_READ_TOOLS
+print([t.name for t in LLM_READ_TOOLS])
+"
+
+# 3. 测试提示词构建器
+app/agent/.venv/bin/python -c "
+import sys, json; sys.path.insert(0, 'app/agent')
+from seller_core import _build_stock_analysis_prompt
+task = json.dumps({'task': '分析 AAPL', 'terms': {'symbols': ['AAPL'], 'analysis_type': 'technical', 'language': 'zh'}})
+print(_build_stock_analysis_prompt(task)[:200])
+"
+```
+
+### 集成测试（需要先启动 Agent）
+
+```bash
+# 终端 1 — 启动 Agent
+app/agent/.venv/bin/bag dev
+
+# 终端 2 — 发起报价请求（negotiate）
+curl -s -X POST http://localhost:9000/ \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"role":"user","messageId":"t1","parts":[{"kind":"data","data":{"skill":"negotiate","task_description":"分析 AAPL","terms":{"symbols":["AAPL"],"analysis_type":"fundamental","language":"zh"}}}]}}}' \
+  | python3 -m json.tool
+
+# negotiate 返回签名报价后，链上打款，再调用 notify_funded
+# （完整链上流程见 ERC-8183 协议文档）
+```
+
+### CI 自动测试
+
+[CI Workflow](.github/workflows/ci.yml) 在每次 Push / PR 时自动运行：
+- 代码检查：`ruff check` — 零容忍
+- 分析引擎测试：拉取真实 AAPL 数据，验证 RSI/MACD/布林带
+- 工具加载测试：11 个 LLM 工具全部注册成功
+- 提示词构建器测试：结构化提示词生成验证
 
 ---
 

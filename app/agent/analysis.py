@@ -75,12 +75,13 @@ def _bollinger(close: pd.Series, period: int = 20) -> dict[str, Any]:
     upper = ma + 2 * std
     lower = ma - 2 * std
     cur = float(close.iloc[-1])
-    u, l = float(upper.iloc[-1]), float(lower.iloc[-1])
-    position = (cur - l) / (u - l) if u != l else 0.5
+    upper_val = float(upper.iloc[-1])
+    lower_val = float(lower.iloc[-1])
+    position = (cur - lower_val) / (upper_val - lower_val) if upper_val != lower_val else 0.5
     return {
-        "upper": round(u, 2),
+        "upper": round(upper_val, 2),
         "middle": round(float(ma.iloc[-1]), 2),
-        "lower": round(l, 2),
+        "lower": round(lower_val, 2),
         "position": round(position, 2),
     }
 
