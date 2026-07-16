@@ -174,17 +174,39 @@ def job_spec(job_id: int):
     return JobDescription.from_str(job.description)
 
 
-def submit_result(job_id: int, response_content: str, metadata: dict | None = None):
+def submit_result(
+    job_id: int,
+    response_content: str,
+    metadata: dict | None = None,
+    *,
+    gateway_url: str | None = None,
+    gateway_token: str | None = None,
+):
     """Sign + broadcast the on-chain ``submit`` for ``job_id``.
 
-    Delegates to :func:`bnbagent_studio_core.erc8183.submit_workflow`, which re-verifies
-    the job is genuinely FUNDED + assigned to us (via the SDK's
-    ``ERC8183JobOps.verify_job``), builds the ``DeliverableManifest``, uploads
-    it to storage, and calls on-chain ``submit`` — all ``audited_op``-wrapped.
-    Returns the :class:`SubmitResult` (``.submit_tx`` + ``.deliverable_url``);
-    ``deliverable_url`` is published on-chain by the submit, so the buyer fetches
-    the canonical manifest from storage without an on-chain log scan.
+    When ``gateway_url`` and ``gateway_token`` are provided (set by the buyer in
+    notify_funded), the deliverable is uploaded to the buyer's UOMP payload relay
+    (a local HTTP server exposed via Cloudflare Tunnel). The public tunnel URL is
+    then stored on-chain as the ``deliverable_url``. This is the UOMP remote
+    delivery path.
+
+    Without gateway params the function falls back to the default storage backend
+    configured in studio.toml (typically LocalStorageProvider for local dev).
     """
+    if gateway_url and gateway_token:
+        import bnbagent_studio_core.storage as _storage_mod
+        from uomp_storage import UOMPGatewayStorageProvider, submit_lock
+
+        with submit_lock:
+            _orig = _storage_mod.storage_provider_from_config
+            _storage_mod.storage_provider_from_config = (
+                lambda **_kw: UOMPGatewayStorageProvider(gateway_url, gateway_token)
+            )
+            try:
+                return submit_workflow(job_id, response_content, metadata=metadata)
+            finally:
+                _storage_mod.storage_provider_from_config = _orig
+
     return submit_workflow(job_id, response_content, metadata=metadata)
 
 

@@ -94,6 +94,9 @@ class SellerCore:
         #                 slower sweep never re-delivers a just-submitted job).
         self._tasks: set[asyncio.Task] = set()
         self._inflight: set[int] = set()
+        # Per-job UOMP gateway params extracted from the buyer's notify_funded data.
+        # Keyed by job_id; consumed (popped) in _do_work_and_submit.
+        self._job_gateways: dict[int, tuple[str, str]] = {}
 
     def is_busy(self) -> bool:
         """True while any background delivery is in flight.
@@ -145,6 +148,15 @@ class SellerCore:
             job_id = _parse_job_id(raw)
         except (TypeError, ValueError):
             return {"status": "rejected", "error": f"invalid job_id: {raw!r}"}
+
+        # UOMP delivery: buyer passes its relay URL + token so the seller can
+        # upload the report directly to the buyer's local gateway.
+        gw_url = data.get("delivery_gateway_url")
+        gw_tok = data.get("delivery_gateway_token")
+        if gw_url and gw_tok:
+            self._job_gateways[job_id] = (str(gw_url), str(gw_tok))
+            logger.info("job %s: UOMP gateway delivery → %s", job_id, gw_url)
+
         verified = False
         try:
             # Off the event loop + time-bounded: a blocking RPC must not stall the
@@ -244,6 +256,11 @@ class SellerCore:
         (defense in depth) and RAISES on a failed submit, so an ``ok: True`` result
         always carries a landed tx hash.
         """
+        # Pop gateway params (if the buyer sent them in notify_funded). These are
+        # consumed once here and not retained — each notify_funded is independent.
+        gateway = self._job_gateways.pop(job_id, None)
+        gateway_url, gateway_token = gateway if gateway else (None, None)
+
         spec = await asyncio.to_thread(signing.job_spec, job_id)
         if spec is not None:
             task = json.dumps({"task": spec.task, "terms": spec.terms}, ensure_ascii=False)
@@ -262,6 +279,8 @@ class SellerCore:
                     "generator": self._generator,
                     "built_with": "https://github.com/bnb-chain/bnbagent-studio",
                 },
+                gateway_url=gateway_url,
+                gateway_token=gateway_token,
             )
         except SubmitPermanentlyUnsupportedError as e:
             # Deterministic for this wallet kind: submit can NEVER succeed →

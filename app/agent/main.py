@@ -116,6 +116,33 @@ def _load_runtime_secrets() -> None:
 
 _load_runtime_secrets()
 
+# --- Paymaster patch -----------------------------------------------------------
+# MegaFuel paymaster (bsc-testnet default) accepts transactions but never
+# confirms them on testnet — every submit_result call would silently fail.
+# Patch both the config module AND the already-bound name in bnbagent.erc8183.client
+# (which imported resolve_network at module level), then clear the LRU cache so
+# get_8183_client() rebuilds with use_paymaster=False.
+import dataclasses as _dc
+import bnbagent.config as _bnbagent_cfg
+import bnbagent.erc8183.client as _bnb_erc8183_client
+
+_orig_resolve = _bnbagent_cfg.resolve_network
+
+
+def _resolve_no_paymaster(network="bsc-testnet", **kw):
+    nc = _orig_resolve(network, **kw)
+    return _dc.replace(nc, use_paymaster=False)
+
+
+_bnbagent_cfg.resolve_network = _resolve_no_paymaster
+_bnb_erc8183_client.resolve_network = _resolve_no_paymaster
+
+try:
+    from bnbagent_studio_core.erc8183.client import _reset_cache as _reset_8183_cache
+    _reset_8183_cache()
+except Exception:
+    pass
+
 # --- Wallet bootstrap -----------------------------------------------------------
 # Wallet material is NEVER bundled into the deploy artifact. `bag deploy`
 # injects it via Secrets Manager and these calls (run once at cold start,
@@ -329,7 +356,7 @@ if __name__ == "__main__":
             path = scope.get("path", "")
             m = re.match(r"^/erc8183/job/(\d+)/response$", path)
             if m:
-                fpath = _storage_dir / f"job-{m.group(1)}.json"
+                fpath = _storage_dir / f"erc8183-job-{m.group(1)}.json"
                 if fpath.exists():
                     body = fpath.read_bytes()
                     await send({"type": "http.response.start", "status": 200,
