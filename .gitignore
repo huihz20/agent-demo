@@ -10,6 +10,10 @@
 # secret file here (never commit it).
 agentcore/.env.local
 
+# Local agent deliverables storage (written by LocalStorageProvider)
+.agent-data/
+app/agent/.agent-data/
+
 # Python
 __pycache__/
 *.py[cod]

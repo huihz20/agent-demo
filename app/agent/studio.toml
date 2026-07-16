@@ -39,8 +39,9 @@ keystore_dir = "../../.studio/wallets"
 address = "0x1FF095E1C5Cf4bC72a3DC54be17B6cf85043Fb67"
 
 [llm]
-provider = "pieverse-llm"
-model = "auto/free"
+provider = "openai"
+model = "moonshot-v1-32k"
+base_url = "https://api.moonshot.cn/v1"
 
 [llm.pieverse]
 # Pieverse topup runs ONLY on BSC mainnet (chainId=56); decoupled from [network].default.

@@ -309,21 +309,41 @@ async def _emit(send, start_message, body: bytes):
 
 
 if __name__ == "__main__":
+    import re
+    from pathlib import Path
+
     import uvicorn
     from bedrock_agentcore.runtime import build_a2a_app
 
-    # build_a2a_app is serve_a2a's own builder (it returns the Starlette app
-    # instead of running uvicorn), so the /ping + card + JSON-RPC wiring is
-    # identical to serve_a2a — we only interpose the error-input stripper before
-    # serving.
     app = build_a2a_app(executor, agent_card, ping_handler=_ping_status)
     app = _strip_error_input(app)
 
+    # Serve local-storage deliverables at /erc8183/job/{id}/response so that
+    # ERC8183_AGENT_URL=http://localhost:9000/erc8183 works in local dev.
+    # The LocalStorageProvider writes job-{id}.json into STORAGE_LOCAL_PATH.
+    _inner = app
+    _storage_dir = Path(os.environ.get("STORAGE_LOCAL_PATH") or ".agent-data")
+
+    async def _app(scope, receive, send):
+        if scope["type"] == "http":
+            path = scope.get("path", "")
+            m = re.match(r"^/erc8183/job/(\d+)/response$", path)
+            if m:
+                fpath = _storage_dir / f"job-{m.group(1)}.json"
+                if fpath.exists():
+                    body = fpath.read_bytes()
+                    await send({"type": "http.response.start", "status": 200,
+                                "headers": [(b"content-type", b"application/json"),
+                                            (b"content-length", str(len(body)).encode())]})
+                    await send({"type": "http.response.body", "body": body})
+                else:
+                    await send({"type": "http.response.start", "status": 404, "headers": []})
+                    await send({"type": "http.response.body", "body": b"not found"})
+                return
+        await _inner(scope, receive, send)
+
     uvicorn.run(
-        app,
-        # AgentCore's A2A contract is 0.0.0.0:9000. Do not honor the HTTP
-        # protocol's $PORT=8080 convention here; AGENT_PORT is the local-dev /
-        # rendered-container override.
+        _app,
         host=os.environ.get("AGENT_BIND_HOST") or "0.0.0.0",
         port=int(os.environ.get("AGENT_PORT") or "9000"),
         log_level="info",
