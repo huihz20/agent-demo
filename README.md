@@ -1,5 +1,12 @@
 # Agent Demo — ERC-8183 + UOMP
 
+[![ERC-8183](https://img.shields.io/badge/Protocol-ERC--8183-blue)](https://github.com/bnb-chain/BEPs)
+[![UOMP](https://img.shields.io/badge/Context-UOMP-purple)](https://github.com/0xaicrypto/uomp-core)
+[![Network](https://img.shields.io/badge/Network-BSC%20Testnet-yellow)](https://testnet.bscscan.com)
+[![Python](https://img.shields.io/badge/Seller-Python%203.12-3776AB?logo=python)](stockanalyst/)
+[![TypeScript](https://img.shields.io/badge/Buyer-TypeScript-3178C6?logo=typescript)](buyer-client/)
+[![License](https://img.shields.io/badge/License-Apache%202.0-green)](LICENSE)
+
 End-to-end demo of a personalized AI service purchase on BNB Chain:
 
 - **Seller** (`stockanalyst/`) — stock analysis agent deployed on BNB Chain platform, signs quotes and delivers reports
