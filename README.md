@@ -134,83 +134,22 @@ The platform injects secrets into the operator's Secrets Manager and routes to t
 
 This repository uses **GitHub Actions** for automated testing and deployment.
 
-### Workflow: `.github/workflows/ci.yml`
+| Workflow | Trigger | What it does |
+|----------|---------|--------------|
+| [CI](.github/workflows/ci.yml) | Push / PR to `main` | Lint (`ruff`) + analysis engine tests + tools load test |
+| [Deploy](.github/workflows/deploy.yml) | Push to `main` (requires `production` environment approval) | `bag deploy agent` to BNB Chain platform |
 
-| Step | Trigger | Action |
-|------|---------|--------|
-| **Lint & Type Check** | Push / PR | `ruff check` + `pyright` |
-| **Unit Tests** | Push / PR | `pytest app/agent/tests/` |
-| **Integration Test** | Push to `main` | `bag dev` smoke test (negotiate skill) |
-| **Deploy** | Push to `main` (manual approve) | `bag deploy agent` to platform |
+### Required GitHub Secrets
 
-### Secrets required (GitHub → Settings → Secrets)
+Go to **Settings → Secrets and variables → Actions** and add:
 
 | Secret | Description |
 |--------|-------------|
 | `WALLET_PASSWORD` | Keystore encryption password |
-| `PIEVERSE_LLM_API_KEY` | Pieverse LLM API key |
-| `BAG_PLATFORM_TOKEN` | `bag platform login` session token |
-
-### Sample workflow
-
-```yaml
-# .github/workflows/ci.yml
-name: CI
-
-on:
-  push:
-    branches: [main]
-    paths: ['stockanalyst/**']
-  pull_request:
-    paths: ['stockanalyst/**']
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: stockanalyst
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install dependencies
-        run: |
-          pip install uv
-          uv venv app/agent/.venv --python 3.12
-          uv pip install -e ./app/agent --python app/agent/.venv/bin/python
-      - name: Lint
-        run: app/agent/.venv/bin/ruff check app/agent/
-      - name: Test analysis engine
-        run: |
-          app/agent/.venv/bin/python -c "
-          from analysis import fetch_quote, fetch_technical_signals
-          q = fetch_quote('AAPL')
-          assert q.get('price') is not None, 'price missing'
-          t = fetch_technical_signals('AAPL')
-          assert t.get('rsi_14') is not None, 'RSI missing'
-          print('Analysis engine OK')
-          "
-        working-directory: stockanalyst/app/agent
-
-  deploy:
-    needs: test
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    environment: production        # requires manual approval
-    steps:
-      - uses: actions/checkout@v4
-      - name: Deploy to platform
-        env:
-          WALLET_PASSWORD: ${{ secrets.WALLET_PASSWORD }}
-          PIEVERSE_LLM_API_KEY: ${{ secrets.PIEVERSE_LLM_API_KEY }}
-          BAG_PLATFORM_TOKEN: ${{ secrets.BAG_PLATFORM_TOKEN }}
-        run: |
-          pip install uv && uv tool install bnbagent-studio
-          cd stockanalyst
-          bag deploy agent
-```
+| `PIEVERSE_LLM_API_KEY` | Pieverse LLM API key (written by `bag llm activate`) |
+| `STORAGE_API_URL` | IPFS pinning service upload endpoint |
+| `STORAGE_API_KEY` | IPFS pinning service write key |
+| `BAG_PLATFORM_TOKEN` | `bag platform login` session token (deploy only) |
 
 ---
 
@@ -342,21 +281,19 @@ bag deploy status           # 查看部署状态
 
 本仓库使用 **GitHub Actions** 实现自动化测试与部署。
 
-### 流程：`.github/workflows/ci.yml`
-
-| 步骤 | 触发条件 | 操作 |
-|------|----------|------|
-| **代码检查** | Push / PR | `ruff check` + `pyright` |
-| **单元测试** | Push / PR | `pytest app/agent/tests/` |
-| **集成测试** | Push 到 `main` | `bag dev` 冒烟测试（negotiate）|
-| **部署** | Push 到 `main`（需人工审批） | `bag deploy agent` 发布到平台 |
+| Workflow | 触发条件 | 操作 |
+|----------|----------|------|
+| [CI](.github/workflows/ci.yml) | Push / PR 到 `main` | 代码检查 + 分析引擎测试 + 工具加载测试 |
+| [Deploy](.github/workflows/deploy.yml) | Push 到 `main`（需 `production` 环境审批） | `bag deploy agent` 部署到 BNB Chain 平台 |
 
 ### GitHub Secrets 配置
+
+进入 **Settings → Secrets and variables → Actions** 添加：
 
 | Secret | 说明 |
 |--------|------|
 | `WALLET_PASSWORD` | 钱包密钥库加密密码 |
-| `PIEVERSE_LLM_API_KEY` | Pieverse LLM API 密钥 |
-| `BAG_PLATFORM_TOKEN` | `bag platform login` 会话令牌 |
-
-完整 workflow 配置见英文版本。
+| `PIEVERSE_LLM_API_KEY` | Pieverse LLM API 密钥（由 `bag llm activate` 写入） |
+| `STORAGE_API_URL` | IPFS Pinning 服务上传地址 |
+| `STORAGE_API_KEY` | IPFS Pinning 服务写入密钥 |
+| `BAG_PLATFORM_TOKEN` | `bag platform login` 会话令牌（仅部署需要） |

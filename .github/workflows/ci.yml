@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Create venv & install deps
+        working-directory: app/agent
+        run: |
+          uv venv .venv --python 3.12
+          uv pip install -e ".[dev]" --python .venv/bin/python 2>/dev/null || \
+          uv pip install -e . --python .venv/bin/python
+          uv pip install ruff --python .venv/bin/python
+
+      - name: Lint
+        working-directory: app/agent
+        run: .venv/bin/ruff check . --exclude .venv
+
+      - name: Test analysis engine
+        working-directory: app/agent
+        run: |
+          .venv/bin/python -c "
+          from analysis import fetch_quote, fetch_technical_signals
+
+          q = fetch_quote('AAPL')
+          assert q.get('price') is not None, f'price missing: {q}'
+          assert q.get('sector') is not None, f'sector missing: {q}'
+
+          t = fetch_technical_signals('AAPL')
+          assert t.get('rsi_14') is not None, f'RSI missing: {t}'
+          assert t.get('macd') is not None, f'MACD missing: {t}'
+          assert t.get('bollinger_20') is not None, f'Bollinger missing: {t}'
+
+          print(f'AAPL price={q[\"price\"]} RSI={t[\"rsi_14\"]} MACD={t[\"macd\"][\"crossover\"]}')
+          print('Analysis engine OK')
+          "
+
+      - name: Test tools load
+        working-directory: app/agent
+        run: |
+          .venv/bin/python -c "
+          from tools import LLM_READ_TOOLS
+          names = [t.name for t in LLM_READ_TOOLS]
+          assert 'get_stock_quote' in names, 'get_stock_quote missing'
+          assert 'get_technical_signals' in names, 'get_technical_signals missing'
+          print(f'Tools loaded: {names}')
+          "
+
+      - name: Test prompt builder
+        working-directory: app/agent
+        run: |
+          .venv/bin/python -c "
+          import json
+          from seller_core import _build_stock_analysis_prompt
+          task = json.dumps({'task': 'Analyze AAPL', 'terms': {'symbols': ['AAPL'], 'analysis_type': 'technical', 'language': 'en'}})
+          prompt = _build_stock_analysis_prompt(task)
+          assert 'AAPL' in prompt
+          assert 'get_stock_quote' in prompt
+          print('Prompt builder OK')
+          "
