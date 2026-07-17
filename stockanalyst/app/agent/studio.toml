@@ -101,10 +101,10 @@ allowed_hosts = ["llm.pieverse.io"]
 [deploy.platform]
 terms_accepted_at = "2026-07-16T15:01:53Z"
 slug = "stockanalyst"
-deployment_id = "01KXR2C7KVGRZXPGRKXP0FDP18"
+deployment_id = "01KXR5EEE0E9GMFX86DTAZCFC0"
 agent_id = "01KXNQ7T88G307WMG5C1DVSR00"
 invoke_url = "https://bnbagent-api.bnbchain.world/v1/rt/01KXNQ7T88G307WMG5C1DVSR00/.well-known/agent-card.json"
-last_deploy_at = "2026-07-17T12:57:30Z"
+last_deploy_at = "2026-07-17T13:51:14Z"
 
 [identity]
 endpoint = "https://bnbagent-api.bnbchain.world/v1/rt/01KXNQ7T88G307WMG5C1DVSR00/.well-known/agent-card.json"
