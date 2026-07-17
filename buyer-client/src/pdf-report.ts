@@ -163,33 +163,48 @@ ${markdownHtml}
 </html>`;
 }
 
-// ── Markdown → HTML (minimal, dependency-free) ───────────────────────────────
-function mdToHtml(md: string): string {
-  return md
-    // Fenced code blocks (strip them — report shouldn't have code)
-    .replace(/```[\s\S]*?```/g, "")
-    // HR
-    .replace(/^---+$/gm, "<hr>")
-    // H1-H4
-    .replace(/^#### (.+)$/gm, "<h4>$1</h4>")
-    .replace(/^### (.+)$/gm, "<h3>$1</h3>")
-    .replace(/^## (.+)$/gm, "<h2>$1</h2>")
-    .replace(/^# (.+)$/gm, "<h1>$1</h1>")
-    // Blockquotes
-    .replace(/^> (.+)$/gm, "<blockquote><p>$1</p></blockquote>")
-    // Bold + italic
+// ── Inline markdown processor (reusable for cell content and prose) ──────────
+function inlineToHtml(s: string): string {
+  return s
     .replace(/\*\*\*(.+?)\*\*\*/g, "<strong><em>$1</em></strong>")
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/\*(.+?)\*/g, "<em>$1</em>")
-    // Inline code
+    .replace(/`([^`]+)`/g, "<code>$1</code>");
+}
+
+// ── Markdown → HTML ───────────────────────────────────────────────────────────
+function mdToHtml(md: string): string {
+  // Block-level element tag names — paragraph catch-all skips these
+  const BLOCK = /^<(h[1-6]|table|thead|tbody|tr|ul|ol|li|blockquote|hr|div|p)\b/;
+
+  return md
+    // Fenced code blocks (strip — reports shouldn't have code)
+    .replace(/```[\s\S]*?```/g, "")
+    // HR
+    .replace(/^---+$/gm, "<hr>")
+    // H1-H4 (run before blockquotes so "## heading" inside prose isn't swallowed)
+    .replace(/^#### (.+)$/gm, (_, t) => `<h4>${inlineToHtml(t)}</h4>`)
+    .replace(/^### (.+)$/gm,  (_, t) => `<h3>${inlineToHtml(t)}</h3>`)
+    .replace(/^## (.+)$/gm,   (_, t) => `<h2>${inlineToHtml(t)}</h2>`)
+    .replace(/^# (.+)$/gm,    (_, t) => `<h1>${inlineToHtml(t)}</h1>`)
+    // Blockquotes — process inline markup inside them
+    .replace(/^> (.+)$/gm, (_, content) => {
+      // Strip any stray heading markers left inside a blockquote
+      const clean = content.replace(/^#{1,4}\s+/, "");
+      return `<blockquote><p>${inlineToHtml(clean)}</p></blockquote>`;
+    })
+    // Inline markup for remaining prose (not already inside block tags)
+    .replace(/\*\*\*(.+?)\*\*\*/g, "<strong><em>$1</em></strong>")
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*(.+?)\*/g, "<em>$1</em>")
     .replace(/`([^`]+)`/g, "<code>$1</code>")
-    // Unordered lists (multi-line)
+    // Unordered lists
     .replace(/^(\s*[-*] .+(\n\s*[-*] .+)*)/gm, (block) => {
       const items = block
         .trim()
         .split(/\n\s*[-*] /)
         .filter(Boolean)
-        .map((s) => `<li>${s.replace(/^[-*] /, "").trim()}</li>`)
+        .map((s) => `<li>${inlineToHtml(s.replace(/^[-*] /, "").trim())}</li>`)
         .join("");
       return `<ul>${items}</ul>`;
     })
@@ -199,23 +214,22 @@ function mdToHtml(md: string): string {
         .trim()
         .split(/\n\s*\d+\. /)
         .filter(Boolean)
-        .map((s) => `<li>${s.replace(/^\d+\. /, "").trim()}</li>`)
+        .map((s) => `<li>${inlineToHtml(s.replace(/^\d+\. /, "").trim())}</li>`)
         .join("");
       return `<ol>${items}</ol>`;
     })
-    // Tables
+    // Tables — apply inline markup inside cells
     .replace(/^\|(.+)\|$/gm, (_, row) => {
       const cells = row.split("|").map((c: string) => c.trim());
-      return `<tr-row>${cells.map((c: string) => `<cell>${c}</cell>`).join("")}</tr-row>`;
+      return `<tr-row>${cells.map((c: string) => `<cell>${inlineToHtml(c)}</cell>`).join("")}</tr-row>`;
     })
-    // Table assembler (groups consecutive <tr-row> into <table>)
+    // Table assembler
     .replace(/(<tr-row>.*?<\/tr-row>\n?)+/gs, (block) => {
       const rows = [...block.matchAll(/<tr-row>(.*?)<\/tr-row>/gs)];
       if (rows.length === 0) return block;
       let table = "<table>";
       rows.forEach((m, i) => {
         const cells = [...(m[1] ?? "").matchAll(/<cell>(.*?)<\/cell>/gs)].map((c) => c[1]);
-        // Row 1 = header, row 2 = separator (skip), rest = body
         if (i === 0) {
           table += "<thead><tr>" + cells.map((c) => `<th>${c}</th>`).join("") + "</tr></thead><tbody>";
         } else if (i === 1 && cells.every((c) => /^[-|: ]+$/.test(c ?? ""))) {
@@ -227,10 +241,16 @@ function mdToHtml(md: string): string {
       table += "</tbody></table>";
       return table;
     })
-    // Paragraphs (lines not already wrapped in block-level tags)
-    .replace(/^(?!<[a-z]).+$/gm, (line) => (line.trim() ? `<p>${line}</p>` : ""))
-    // Cleanup empty paragraphs
-    .replace(/<p><\/p>/g, "")
+    // Paragraphs — wrap any non-empty line that is not already a block element.
+    // Inline elements (<strong>, <em>, <code>) ARE wrapped; block elements are NOT.
+    .replace(/^.+$/gm, (line) => {
+      if (!line.trim()) return "";
+      if (BLOCK.test(line)) return line;
+      // Already wrapped by a previous rule (e.g. heading lines that were converted inline)
+      if (/^<(tr-row|cell)/.test(line)) return line;
+      return `<p>${line}</p>`;
+    })
+    // Cleanup
     .replace(/<p>\s*<\/p>/g, "");
 }
 
