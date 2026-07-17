@@ -33,16 +33,20 @@ _TIMEOUT = 10
 def fetch_macro_context() -> dict[str, Any]:
     """Fetch key macroeconomic indicators.
 
-    Sources:
-    - FRED (Federal Reserve Economic Data): fed funds rate, 10Y treasury yield,
-      CPI year-over-year, unemployment rate.
-    - yfinance: VIX (fear index) — no key needed.
+    Primary source: FRED (requires FRED_API_KEY env var).
+    Fallback: yfinance CBOE yield indices — no key needed, available always.
+      ^VIX  = CBOE Volatility Index
+      ^TNX  = 10-Year Treasury Yield (value already in %, e.g. 4.35 = 4.35%)
+      ^IRX  = 13-Week T-Bill Yield (proxy for Fed Funds rate)
 
     Returns a dict with numeric values and plain-English signals.
     """
-    result: dict[str, Any] = {}
-    api_key = os.environ.get("FRED_API_KEY", "")
+    import yfinance as yf
 
+    result: dict[str, Any] = {}
+
+    # ── Primary: FRED ─────────────────────────────────────────────────────────
+    api_key = os.environ.get("FRED_API_KEY", "")
     if api_key:
         try:
             from fredapi import Fred
@@ -52,20 +56,41 @@ def fetch_macro_context() -> dict[str, Any]:
             cpi = fred.get_series("CPIAUCSL")
             result["cpi_yoy_pct"] = round(float(cpi.pct_change(12).iloc[-1] * 100), 2)
             result["unemployment_pct"] = round(float(fred.get_series("UNRATE").iloc[-1]), 2)
-            result["rate_environment"] = (
-                "restrictive" if result["fed_funds_rate"] > 4 else
-                "neutral" if result["fed_funds_rate"] > 2 else
-                "accommodative"
-            )
         except Exception as e:
             logger.warning("FRED fetch failed: %s", e)
             result["fred_error"] = str(e)
     else:
-        result["fred_note"] = "FRED_API_KEY not set — macro data unavailable"
+        logger.warning("FRED_API_KEY not set — using yfinance fallbacks for rate data")
 
-    # VIX from yfinance (no key required)
+    # ── Fallback: yfinance yield indices (no key needed) ──────────────────────
+    def _yf_price(ticker: str) -> float | None:
+        try:
+            info = yf.Ticker(ticker).info
+            val = info.get("regularMarketPrice") or info.get("previousClose")
+            return round(float(val), 2) if val else None
+        except Exception:
+            return None
+
+    # 10-Year Treasury — ^TNX reports yield already in % (e.g. 4.35)
+    if "treasury_10y_yield" not in result:
+        val = _yf_price("^TNX")
+        if val is not None:
+            # Sanity check: TNX sometimes returns tenths-of-percent (e.g. 43.5)
+            result["treasury_10y_yield"] = round(val / 10, 2) if val > 20 else val
+            result["treasury_10y_source"] = "yfinance ^TNX"
+
+    # Fed Funds proxy — 3-month T-bill (^IRX) closely tracks the Fed Funds rate
+    if "fed_funds_rate" not in result:
+        val = _yf_price("^IRX")
+        if val is not None:
+            result["fed_funds_rate"] = round(val / 10, 2) if val > 20 else val
+            result["fed_funds_source"] = "yfinance ^IRX (3-month T-bill proxy)"
+
+    # CPI and Unemployment have no good yfinance substitute — leave blank if FRED unavailable
+    # The LLM will write "—" for those cells per the prompt rules.
+
+    # ── VIX (yfinance, always attempted) ──────────────────────────────────────
     try:
-        import yfinance as yf
         vix_info = yf.Ticker("^VIX").info
         vix = vix_info.get("regularMarketPrice") or vix_info.get("previousClose")
         if vix:
@@ -78,6 +103,15 @@ def fetch_macro_context() -> dict[str, Any]:
             )
     except Exception as e:
         logger.warning("VIX fetch failed: %s", e)
+
+    # ── Rate environment label (derived once all rate data is collected) ───────
+    ffr = result.get("fed_funds_rate")
+    if ffr is not None:
+        result["rate_environment"] = (
+            "restrictive" if ffr > 4 else
+            "neutral"     if ffr > 2 else
+            "accommodative"
+        )
 
     return result
 

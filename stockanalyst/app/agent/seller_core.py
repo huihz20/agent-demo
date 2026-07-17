@@ -408,50 +408,78 @@ def _build_stock_analysis_prompt(
     if context_section:
         context_section = f"\n{context_section}\n"
 
+    # Build explicit per-symbol checklist for Stage 1 and the report outline for Stage 2
+    symbol_checklist = "\n".join(
+        f"  {i+1}. {sym}: get_stock_quote, get_technical_signals, get_options_sentiment, "
+        f"get_insider_activity, get_news_sentiment"
+        for i, sym in enumerate(symbols)
+    ) if symbols else f"  1. {symbol_list}: all five tools"
+
+    symbol_report_outline = "\n\n---\n\n".join(
+        f"## {sym} — [Full Company Name]\n\n"
+        "[Write the complete per-stock block for this symbol as described below.]"
+        for sym in (symbols if symbols else [symbol_list])
+    )
+
     return f"""You are a senior equity analyst at a top-tier investment bank. A client has paid for a professional research report.
 
 STOCKS TO ANALYZE: {symbol_list}
+NUMBER OF STOCKS: {len(symbols) if symbols else 1} — you must produce a complete analysis block for EACH one.
 ANALYSIS TYPE: {analysis_type}
 {lang_instruction}{context_section}
 
 ════════════════════════════════════════════════════════
 STAGE 1 — COLLECT ALL DATA (complete every call before writing)
 ════════════════════════════════════════════════════════
-For EACH symbol call all five tools:
-  get_stock_quote(symbol), get_technical_signals(symbol),
-  get_options_sentiment(symbol), get_insider_activity(symbol),
-  get_news_sentiment(symbol)
-Call once: get_macro_context()
+Call all five tools for EACH symbol, then call get_macro_context() once:
 
-Do not begin writing until every tool call has returned a result.
+{symbol_checklist}
+  + get_macro_context()  (once only)
+
+Do not begin writing until every tool call above has returned a result.
 
 ════════════════════════════════════════════════════════
 STAGE 2 — WRITE THE RESEARCH REPORT
 ════════════════════════════════════════════════════════
-MANDATORY RULES — read before writing a single word:
-1. Every number, percentage, and price in this report must be taken verbatim from a tool call result. Do not estimate, round, or recall from memory.
-2. Do not leave any placeholder in the final output. If a tool returned no data for a field, write a dash (—) in that cell.
+MANDATORY RULES:
+1. Every number, percentage, and price must be taken verbatim from a tool call result. Do not estimate or recall from memory.
+2. Do not leave any placeholder in the final output. If a tool returned no data for a field, write a dash (—).
 3. Do not use emoji or decorative icons anywhere in the report.
-4. Write in formal institutional prose for analysis and judgement sections. Use tables for all structured data.
-5. Every recommendation must name a specific price level, share count, or percentage trigger — not vague instructions like "consider reducing."
+4. Write in formal institutional prose for analysis sections. Use tables for all structured data.
+5. Every recommendation must name a specific price level, share count, or percentage trigger.
+6. You MUST write a complete analysis block for every symbol listed above. Do not stop after the first stock.
 
 ---
 
 # Stock Analysis Report
 
-## Market Snapshot
+## Executive Summary
 
-Write a five-row table with columns Indicator | Value | Signal.
-Use the exact values returned by get_macro_context() for each row.
-Rows: VIX, Fed Funds Rate, 10-Year Treasury Yield, CPI (Year-on-Year), Unemployment Rate.
-For the Signal column: characterise each reading concisely (e.g. for VIX: "Low volatility regime — risk appetite supportive"; for rates: "On hold — neutral for equity multiples").
-After the table, write one sentence stating the overall macro posture (risk-on or risk-off) and its primary implication for the client portfolio.
+Write this section FIRST, after all tool calls are complete.
+Three to five sentences covering:
+- Overall market posture (risk-on or risk-off, based on VIX and rate data)
+- A one-line verdict for EACH stock (Rating, Price Target, key reason in one clause)
+- The single most important portfolio action the client should take this week
 
 ---
 
-(Write one complete block per stock. Repeat for every symbol in {symbol_list}.)
+## Market Snapshot
 
-## [Ticker] — [Full Company Name]
+Write a five-row table: Indicator | Value | Signal.
+Use exact values from get_macro_context().
+Rows: VIX, Fed Funds Rate (or 3-month T-bill rate if Fed Funds unavailable), 10-Year Treasury Yield, CPI YoY (write "—" if unavailable), Unemployment Rate (write "—" if unavailable).
+Signal column: one concise phrase per indicator (e.g. "Low volatility — risk appetite supportive").
+Follow with one sentence on overall macro posture and its implication for the portfolio.
+
+---
+
+{symbol_report_outline}
+
+For EACH stock block above, write the following sections in full:
+
+**Rating: [Buy / Hold / Sell]** | **Price Target: $[price]** | **Implied Return: [+/-%]** | **Horizon: [N] months** | **Risk: [Low / Moderate / High / Very High]**
+
+Two to three sentences of rating rationale before the tables.
 
 **Rating: [Buy / Hold / Sell]** | **Price Target: $[price]** | **Implied Return: [+/-%]** | **Horizon: [N] months** | **Risk: [Low / Moderate / High / Very High]**
 
