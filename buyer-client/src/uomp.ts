@@ -86,6 +86,8 @@ export async function buildTaskFromMemory(memory: UserMemory): Promise<{
   task: string;
   deliverables: string;
   quality: string;
+  portfolio: Holding[];
+  riskProfile: RiskProfile;
 }> {
   const holdings = await memory.getByTag<Holding>("portfolio:holdings");
   const [riskItem] = await memory.getByTag<RiskProfile>("profile:risk");
@@ -98,16 +100,29 @@ export async function buildTaskFromMemory(memory: UserMemory): Promise<{
     );
   }
 
-  const symbols = holdings.map((h) => h.value.symbol);
-  const risk = riskItem?.value ?? {
+  const portfolio = holdings.map((h) => h.value);
+  const symbols = portfolio.map((h) => h.symbol);
+  const riskProfile: RiskProfile = riskItem?.value ?? {
     tolerance: "moderate" as const,
-    preferredIndicators: ["RSI-14", "MACD", "Bollinger Bands"],
+    horizonMonths: 12,
+    preferredIndicators: ["RSI-14", "MACD", "Bollinger Bands", "MA50/200", "ADX"],
   };
-  const indicators = risk.preferredIndicators.join(", ");
+  const indicators = riskProfile.preferredIndicators.join(", ");
 
-  const task = `Comprehensive stock analysis for ${symbols.join(", ")} (${risk.tolerance} risk profile)`;
-  const deliverables = `Markdown report: current price, fundamentals, ${indicators}, risk rating, and buy/hold/sell recommendation`;
-  const quality = `Real market data via yfinance, all technical indicators computed (${indicators}), bilingual EN output`;
+  const holdingSummary = portfolio
+    .map((h) => `${h.symbol} (${h.shares}sh @ ${h.currency}${h.avgCost})`)
+    .join(", ");
 
-  return { symbols, task, deliverables, quality };
+  const task =
+    `Comprehensive stock analysis for ${symbols.join(", ")} ` +
+    `(${riskProfile.tolerance} risk, ${riskProfile.horizonMonths}mo horizon). ` +
+    `Holdings: ${holdingSummary}`;
+  const deliverables =
+    `Markdown report: fundamentals, ${indicators}, options sentiment, ` +
+    `insider activity, macro context, P&L vs avg cost, buy/hold/sell recommendation with target`;
+  const quality =
+    `Real market data: yfinance, SEC EDGAR, FRED macro, Alpha Vantage sentiment, NewsAPI. ` +
+    `All technical indicators computed (${indicators}). Portfolio P&L personalised.`;
+
+  return { symbols, task, deliverables, quality, portfolio, riskProfile };
 }

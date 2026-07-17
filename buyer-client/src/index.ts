@@ -107,9 +107,10 @@ async function main(): Promise<void> {
   const guardUrl = process.env["UOMP_GUARD_URL"] ?? "http://127.0.0.1:9374";
   const memory = new GuardUserMemory();
 
-  const { symbols, task, deliverables, quality } = await buildTaskFromMemory(memory);
+  const { symbols, task, deliverables, quality, portfolio, riskProfile } = await buildTaskFromMemory(memory);
   console.log(`  ✓ Symbols:     ${symbols.join(", ")}`);
   console.log(`  ✓ Task:        ${task}`);
+  console.log(`  ✓ Risk:        ${riskProfile.tolerance} / ${riskProfile.horizonMonths}mo`);
   console.log(`  ✓ Source:      UOMP Guard at ${guardUrl}`);
 
   // ── Step 2: Negotiate ────────────────────────────────────────────────────
@@ -140,8 +141,10 @@ async function main(): Promise<void> {
   // ── Step 4: notify_funded ────────────────────────────────────────────────
   hr(`Step 4: notify_funded — tell agent job #${buy.jobId} is funded`);
   const notifyStatus = await notifyFunded(AGENT_ENDPOINT, buy.jobId, {
-    gatewayUrl: relay?.publicUrl,
+    gatewayUrl:   relay?.publicUrl,
     gatewayToken: relay?.token,
+    portfolio,
+    riskProfile,
   });
   if (relay) {
     console.log(`  ✓ Gateway URL  ${relay.publicUrl}`);

@@ -97,6 +97,8 @@ class SellerCore:
         # Per-job UOMP gateway params extracted from the buyer's notify_funded data.
         # Keyed by job_id; consumed (popped) in _do_work_and_submit.
         self._job_gateways: dict[int, tuple[str, str]] = {}
+        # Per-job UOMP portfolio context (holdings + risk profile) from the buyer.
+        self._job_portfolios: dict[int, dict] = {}
 
     def is_busy(self) -> bool:
         """True while any background delivery is in flight.
@@ -156,6 +158,16 @@ class SellerCore:
         if gw_url and gw_tok:
             self._job_gateways[job_id] = (str(gw_url), str(gw_tok))
             logger.info("job %s: UOMP gateway delivery → %s", job_id, gw_url)
+
+        # UOMP portfolio context: buyer passes holdings + risk profile for personalised analysis.
+        portfolio = data.get("portfolio")
+        risk_profile = data.get("risk_profile")
+        if portfolio or risk_profile:
+            self._job_portfolios[job_id] = {
+                "portfolio": portfolio or [],
+                "risk_profile": risk_profile or {},
+            }
+            logger.info("job %s: portfolio context received (%d holdings)", job_id, len(portfolio or []))
 
         verified = False
         try:
@@ -261,12 +273,19 @@ class SellerCore:
         gateway = self._job_gateways.pop(job_id, None)
         gateway_url, gateway_token = gateway if gateway else (None, None)
 
+        # Pop UOMP portfolio context (if the buyer sent it in notify_funded).
+        portfolio_data = self._job_portfolios.pop(job_id, {})
+
         spec = await asyncio.to_thread(signing.job_spec, job_id)
         if spec is not None:
             task = json.dumps({"task": spec.task, "terms": spec.terms}, ensure_ascii=False)
         else:
             task = f"job {job_id}"
-        prompt = _build_stock_analysis_prompt(task)
+        prompt = _build_stock_analysis_prompt(
+            task,
+            portfolio=portfolio_data.get("portfolio", []),
+            risk_profile=portfolio_data.get("risk_profile", {}),
+        )
         work = await self._run_work(prompt, session_id=str(job_id))
 
         try:
@@ -324,8 +343,12 @@ class SellerCore:
                 continue
 
 
-def _build_stock_analysis_prompt(task_json: str) -> str:
-    """Build a stock analysis prompt from the job task JSON."""
+def _build_stock_analysis_prompt(
+    task_json: str,
+    portfolio: list | None = None,
+    risk_profile: dict | None = None,
+) -> str:
+    """Build a comprehensive stock analysis prompt from the job task JSON and UOMP context."""
     try:
         data = json.loads(task_json)
         task_desc = data.get("task", "")
@@ -354,57 +377,93 @@ def _build_stock_analysis_prompt(task_json: str) -> str:
         else "Respond in English."
     )
 
-    analysis_instructions = {
-        "fundamental": (
-            "Focus on: valuation (PE, PB, forward PE), growth metrics (revenue growth, margins), "
-            "analyst consensus and price target, and fundamental risk factors."
-        ),
-        "technical": (
-            "Focus on: RSI-14 (overbought/oversold), MACD crossover signals, Bollinger Band position, "
-            "price momentum (1M and 3M change), and key support/resistance levels."
-        ),
-        "comprehensive": (
-            "Cover both fundamental analysis (valuation, growth, analyst target) AND "
-            "technical analysis (RSI, MACD, Bollinger Bands, momentum). "
-            "Include a portfolio-level risk summary if multiple stocks are provided."
-        ),
-    }.get(analysis_type, "Cover both fundamental and technical analysis.")
+    # Build portfolio context block if we have holdings
+    portfolio_block = ""
+    holding_map: dict[str, dict] = {}
+    if portfolio:
+        lines = ["CLIENT PORTFOLIO (use this for personalised P&L analysis):"]
+        for h in portfolio:
+            sym = str(h.get("symbol", "")).upper()
+            avg_cost = h.get("avgCost")
+            shares = h.get("shares")
+            currency = h.get("currency", "USD")
+            if sym and avg_cost is not None and shares is not None:
+                holding_map[sym] = {"avgCost": avg_cost, "shares": shares, "currency": currency}
+                lines.append(f"  {sym}: {shares} shares @ {currency} {avg_cost:.2f} avg cost")
+        if len(lines) > 1:
+            portfolio_block = "\n".join(lines)
 
-    return f"""You are a professional stock analyst. A client has paid for a stock analysis report.
+    risk_block = ""
+    if risk_profile:
+        tolerance = risk_profile.get("tolerance", "moderate")
+        horizon = risk_profile.get("horizonMonths", 12)
+        indicators = risk_profile.get("preferredIndicators", [])
+        parts = [f"CLIENT RISK PROFILE: {tolerance} tolerance, {horizon}mo horizon"]
+        if indicators:
+            parts.append(f"  Preferred indicators: {', '.join(indicators)}")
+        risk_block = "\n".join(parts)
+
+    context_section = "\n".join(filter(None, [portfolio_block, risk_block]))
+    if context_section:
+        context_section = f"\n{context_section}\n"
+
+    return f"""You are a professional buy-side stock analyst. A client has paid for a premium report.
 
 STOCKS TO ANALYZE: {symbol_list}
 ANALYSIS TYPE: {analysis_type}
-{lang_instruction}
+{lang_instruction}{context_section}
 
-INSTRUCTIONS:
-1. For EACH stock symbol, call get_stock_quote() and get_technical_signals() to fetch real market data.
-2. {analysis_instructions}
-3. Produce a complete Markdown report with the following structure:
+STAGE 1 — COLLECT ALL DATA FIRST (call tools before writing):
+For each symbol call:
+  get_stock_quote(symbol), get_technical_signals(symbol), get_options_sentiment(symbol),
+  get_insider_activity(symbol), get_news_sentiment(symbol)
+Call once: get_macro_context()
 
----
+STAGE 2 — WRITE THE REPORT using ONLY real data from the tool calls:
+
 # Stock Analysis Report
 
 ## Executive Summary
-(2-3 sentences summarizing key findings and overall market outlook)
+(Market environment from macro data — VIX, rate regime, overall portfolio outlook)
 
-## Individual Stock Analysis
-(For each stock:)
-### [SYMBOL] — [Company Name]
-- **Current Price**: $X | **52W Range**: $low – $high
-- **Valuation**: PE=X, PB=X, Analyst Target=$X ([Buy/Hold/Sell])
-- **Technical Signals**: RSI=X ([interpretation]), MACD=[signal], Bollinger=[position]
-- **Momentum**: 1M: +X%, 3M: +X%
-- **Risk Rating**: ★★★☆☆ (1-5 stars, 5=highest risk)
-- **Summary**: (2-3 sentences with actionable insight)
+## [SYMBOL] — [Company Name]  ← repeat for each stock
 
-## Portfolio Overview (if multiple stocks)
-- Sector diversity, concentration risk, and correlation notes
+### Fundamental
+Price, 52W range, market cap. PE/forward PE/PEG vs sector. Analyst target + upside%.
+Revenue growth, gross margins, beta, short float%.
 
-## Risk Disclaimer
-Standard investment disclaimer.
----
+### Technical
+RSI-14 and weekly RSI (overbought/neutral/oversold). MACD crossover signal.
+Bollinger position. MA50/MA200 — golden/death cross status. ADX strength.
+OBV divergence. ATR daily volatility%. VaR 95%.
 
-Use REAL data from the tool calls. Be specific with numbers. Do not fabricate data.
+### Catalysts & Risk
+**Bull thesis** (3 points with expected timing):
+1. ...
+2. ...
+3. ...
+**Bear risks** (3 points):
+1. ...
+2. ...
+3. ...
+Insider activity signal. Options PCR + implied vol. News sentiment score.
+
+### Portfolio Position
+(Only if client holds this stock)
+- Avg cost: $X | Current: $Y | P&L: +/-Z% | Position size: N shares
+- Action: Add / Hold / Trim — and why, based on the technical setup.
+
+### Recommendation
+**BUY / HOLD / SELL** | Target: $X | Horizon: Xmo
+Risk rating: ★★★☆☆ (5=highest risk) — one-line rationale.
+
+## Portfolio Summary
+(If multiple stocks: sector concentration, correlation, overall risk stance)
+
+## Disclaimer
+Past performance does not guarantee future results. This is not investment advice.
+
+NEVER fabricate numbers. Use only data returned by tool calls.
 """
 
 

@@ -21,6 +21,9 @@ dependencies = [
     "a2a-sdk>=0.3,<1.0",
     "yfinance>=0.2.40",
     "pandas>=2.0",
+    "requests>=2.28",
+    "fredapi>=0.3.12",
+    "newsapi-python>=0.2.7",
 ]
 
 [build-system]

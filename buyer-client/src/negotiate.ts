@@ -188,6 +188,10 @@ export function buildJobDescription(envelope: NegotiationEnvelope): string {
 export interface NotifyOptions {
   gatewayUrl?:   string;
   gatewayToken?: string;
+  /** UOMP portfolio holdings — passed to the seller for personalised P&L analysis. */
+  portfolio?:    Array<{ symbol: string; shares: number; avgCost: number; currency: string }>;
+  /** UOMP risk profile — passed to the seller to tailor the report to the client's risk tolerance. */
+  riskProfile?:  { tolerance: string; horizonMonths?: number; preferredIndicators?: string[] };
 }
 
 export async function notifyFunded(
@@ -201,6 +205,8 @@ export async function notifyFunded(
   };
   if (options.gatewayUrl)   data["delivery_gateway_url"]   = options.gatewayUrl;
   if (options.gatewayToken) data["delivery_gateway_token"] = options.gatewayToken;
+  if (options.portfolio?.length)   data["portfolio"]    = options.portfolio;
+  if (options.riskProfile)         data["risk_profile"] = options.riskProfile;
 
   const payload = {
     jsonrpc: "2.0",
