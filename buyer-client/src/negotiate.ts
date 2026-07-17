@@ -14,6 +14,7 @@ export interface NegotiationEnvelope {
   response: {
     accepted: boolean;
     terms: { price: string; currency: string; deliverables?: string; quality_standards?: string; [key: string]: unknown };
+    negotiated_at?: number;
     quote_expires_at?: number;
     estimated_completion_seconds?: number;
     negotiation_hash?: string;
@@ -166,7 +167,7 @@ export function buildJobDescription(envelope: NegotiationEnvelope): string {
 
   const content: Record<string, unknown> = {
     version: 1,
-    negotiated_at: envelope.negotiated_at ?? Math.floor(Date.now() / 1000),
+    negotiated_at: envelope.response.negotiated_at ?? envelope.negotiated_at ?? Math.floor(Date.now() / 1000),
     task: sanitize(envelope.request.task_description),
     terms,
     price: responseTerms.price,

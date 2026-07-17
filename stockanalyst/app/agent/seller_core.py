@@ -178,6 +178,7 @@ class SellerCore:
                 timeout=_PREVERIFY_TIMEOUT_SECONDS,
             )
             if not ok and permanent:
+                logger.warning("job %s: verify rejected permanently — %s", job_id, reason)
                 return {"status": "rejected", "job_id": job_id, "reason": reason}
             verified = ok
         except Exception as e:  # noqa: BLE001 — pre-verify is best-effort; bg re-verifies (incl. TimeoutError)

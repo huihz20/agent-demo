@@ -32,7 +32,7 @@ const ITEMS = [
     value: {
       tolerance: "moderate",
       horizonMonths: 12,
-      preferredIndicators: ["RSI-14", "MACD", "Bollinger Bands"],
+      preferredIndicators: ["RSI-14", "MACD", "Bollinger Bands", "MA50/200", "ADX"],
     },
     tags: ["profile:risk", "preferences"],
     sensitivity: "low", source: "user",
