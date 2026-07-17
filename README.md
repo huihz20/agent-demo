@@ -7,10 +7,14 @@
 [![TypeScript](https://img.shields.io/badge/Buyer-TypeScript-3178C6?logo=typescript)](buyer-client/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green)](LICENSE)
 
-End-to-end demo of a personalized AI service purchase on BNB Chain:
+End-to-end demo of a **personalized AI stock analyst** bought and paid for on BNB Chain.
 
-- **Seller** (`stockanalyst/`) — stock analysis agent deployed on BNB Chain platform, signs quotes and delivers reports
-- **Buyer** (`buyer-client/`) — TypeScript client that reads the user's portfolio from a local UOMP Guard, pays via ERC-8183 escrow, and receives the report through a Cloudflare Tunnel reverse gateway
+The agent aggregates 5 independent data sources (yfinance, FRED macro, SEC EDGAR insider trades, Alpha Vantage AI sentiment, GNews headlines), computes 10 technical indicators (RSI, MACD, Bollinger, MA50/200 golden/death cross, ADX trend strength, OBV, ATR, VaR 95%), and writes a structured report with explicit bull/bear thesis, portfolio P&L vs your actual cost basis, and a hard recommendation with target price.
+
+Payment is trustless: the buyer's 1.0 U is locked in a smart contract escrow and only released after the agent submits a verifiable deliverable on-chain.
+
+- **Seller** (`stockanalyst/`) — stock analysis agent deployed on BNB Chain platform: two-stage LLM (data collection → report writing), 5-source data pipeline, portfolio-personalized output
+- **Buyer** (`buyer-client/`) — TypeScript client that reads the user's portfolio and cost basis from a local UOMP Guard, pays via ERC-8183 escrow, and receives the report through a Cloudflare Tunnel reverse gateway
 
 ## Architecture
 
