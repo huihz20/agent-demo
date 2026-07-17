@@ -256,6 +256,14 @@ export async function saveReport(
   try {
     // Dynamic import so a missing puppeteer doesn't crash the whole process
     const puppeteer = await import("puppeteer" as string);
+    // Prefer system Chrome on macOS if puppeteer's bundled Chrome failed to extract
+    const systemChrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+    const { existsSync } = await import("fs");
+    const launchOpts: Record<string, unknown> = {
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    };
+    if (existsSync(systemChrome)) launchOpts["executablePath"] = systemChrome;
     const browser = await (puppeteer as unknown as {
       launch: (opts: object) => Promise<{
         newPage: () => Promise<{
@@ -265,10 +273,7 @@ export async function saveReport(
         }>;
         close: () => Promise<void>;
       }>;
-    }).launch({
-      headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
-    });
+    }).launch(launchOpts);
 
     const page = await browser.newPage();
     await page.setContent(html, { waitUntil: "networkidle0" });
