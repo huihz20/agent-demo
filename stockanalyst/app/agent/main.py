@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 
 from google.adk.agents import Agent
@@ -53,6 +54,8 @@ from bnbagent_studio_core.wallet import (
 
 from agent_card import build_agent_card
 from executor import SellerAgentExecutor
+from report_schema import StockReport
+from report_renderer import render_report
 from tools import LLM_READ_TOOLS
 
 APP_NAME = "agent"
@@ -215,15 +218,44 @@ agent = Agent(
 runner = InMemoryRunner(agent=agent, app_name=APP_NAME)
 
 
-# --- One-shot LLM helper (the executor's `fulfill` work hook) ------------------
-async def _run_llm(prompt: str, *, session_id: str) -> str:
-    """Run the agent once and return the concatenated final-response text.
+# --- JSON extraction helper ---------------------------------------------------
 
-    `fulfill` produces a single deliverable (not an SSE stream), so we collect
-    the final response text. The session is created on the runner's own
-    session_service (a separate InMemorySessionService would raise "Session not
-    found" on run_async).
+def _extract_json(text: str) -> str:
+    """Extract the outermost JSON object from LLM text.
+
+    Handles: pure JSON, JSON in ```json fences, JSON with a prose preamble.
+    Raises ValueError when no valid JSON object boundary is found.
     """
+    stripped = text.strip()
+    # Fast path: already bare JSON
+    if stripped.startswith("{"):
+        return stripped
+    # Strip code fences (```json ... ``` or ``` ... ```)
+    fence = re.search(r"```(?:json)?\s*(\{.*\})\s*```", stripped, re.DOTALL)
+    if fence:
+        return fence.group(1)
+    # Find outermost { ... } by brace counting
+    start = text.find("{")
+    if start == -1:
+        raise ValueError("No JSON object found in LLM response")
+    depth = 0
+    for i, ch in enumerate(text[start:], start):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    raise ValueError("Unmatched braces — JSON object not closed in LLM response")
+
+
+# --- One-shot LLM helper (the executor's `fulfill` work hook) ------------------
+
+_log = logging.getLogger("seller-agent")
+
+
+async def _call_runner(prompt: str, session_id: str) -> str:
+    """Run the ADK runner once and return raw final-response text (thought-filtered)."""
     session_service = runner.session_service
     existing = await session_service.get_session(
         app_name=runner.app_name, user_id="service", session_id=session_id
@@ -232,7 +264,6 @@ async def _run_llm(prompt: str, *, session_id: str) -> str:
         await session_service.create_session(
             app_name=runner.app_name, user_id="service", session_id=session_id
         )
-
     user_msg = gtypes.Content(role="user", parts=[gtypes.Part(text=prompt)])
     parts: list[str] = []
     async for event in runner.run_async(
@@ -243,6 +274,62 @@ async def _run_llm(prompt: str, *, session_id: str) -> str:
                 if p.text and not getattr(p, "thought", False):
                     parts.append(p.text)
     return "\n".join(parts).strip()
+
+
+async def _run_llm(
+    prompt: str,
+    *,
+    session_id: str,
+    symbols: list[str] | None = None,
+) -> str:
+    """Run the agent, parse its JSON output, validate the schema, render Markdown.
+
+    Flow:
+      1. Call the ADK runner → raw LLM text (thinking stripped).
+      2. Extract the JSON object from the text.
+      3. Parse + validate with StockReport (Pydantic).
+      4. Check that every requested symbol has an analyses entry.
+      5. Render to institutional Markdown via report_renderer.
+      On parse/validation failure: retry once with a correction prompt,
+      then fall back to delivering the raw LLM text so the buyer always gets
+      something.
+    """
+    raw = await _call_runner(prompt, session_id)
+
+    def _try_parse(text: str) -> StockReport | None:
+        try:
+            json_str = _extract_json(text)
+            return StockReport.model_validate_json(json_str)
+        except Exception as exc:
+            _log.warning("report parse/validation failed: %s", exc)
+            return None
+
+    report = _try_parse(raw)
+
+    if report is None:
+        # Retry: ask the model to fix its output in the same session
+        _log.info("retrying with correction prompt (session %s)", session_id)
+        correction = (
+            "Your previous response could not be parsed as valid JSON matching the StockReport schema. "
+            "Output ONLY the corrected JSON object — no text before or after it, no code fences. "
+            "Ensure the analyses array has one entry per symbol and all required fields are present."
+        )
+        raw2 = await _call_runner(correction, session_id)
+        report = _try_parse(raw2)
+
+    if report is None:
+        _log.error("structured output failed after retry (session %s); delivering raw text", session_id)
+        return raw  # fall back: buyer still gets the LLM text
+
+    # Validate symbol completeness (code-level, not prompt-level)
+    if symbols:
+        returned = {a.symbol.upper() for a in report.analyses}
+        missing = [s for s in symbols if s.upper() not in returned]
+        if missing:
+            _log.warning("analyses missing for symbols %s (session %s)", missing, session_id)
+            # Deliver what we have — partial is better than nothing
+
+    return render_report(report)
 
 
 def _default_network() -> str:

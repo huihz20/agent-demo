@@ -282,12 +282,12 @@ class SellerCore:
             task = json.dumps({"task": spec.task, "terms": spec.terms}, ensure_ascii=False)
         else:
             task = f"job {job_id}"
-        prompt = _build_stock_analysis_prompt(
+        prompt, symbols = _build_stock_analysis_prompt(
             task,
             portfolio=portfolio_data.get("portfolio", []),
             risk_profile=portfolio_data.get("risk_profile", {}),
         )
-        work = await self._run_work(prompt, session_id=str(job_id))
+        work = await self._run_work(prompt, session_id=str(job_id), symbols=symbols)
 
         try:
             res = await asyncio.to_thread(
@@ -348,8 +348,16 @@ def _build_stock_analysis_prompt(
     task_json: str,
     portfolio: list | None = None,
     risk_profile: dict | None = None,
-) -> str:
-    """Build a comprehensive stock analysis prompt from the job task JSON and UOMP context."""
+) -> tuple[str, list[str]]:
+    """Build the analysis prompt and return (prompt, symbols).
+
+    Stage 1 drives tool-call data collection per symbol.
+    Stage 2 instructs the LLM to output a single raw JSON object matching the
+    StockReport schema — the JSON is parsed + validated in _run_llm and rendered
+    to Markdown by report_renderer.render_report().
+    """
+    import re as _re
+
     try:
         data = json.loads(task_json)
         task_desc = data.get("task", "")
@@ -363,33 +371,26 @@ def _build_stock_analysis_prompt(
         task_desc = task_json
         terms = {}
 
-    symbols = terms.get("symbols") or []
+    symbols: list[str] = terms.get("symbols") or []
     analysis_type = terms.get("analysis_type", "comprehensive")
-    language = terms.get("language", "en")
 
     if not symbols and task_desc:
-        import re
-        found = re.findall(r'\b[A-Z]{1,5}(?:\.[A-Z]{1,2})?\b', task_desc)
+        found = _re.findall(r'\b[A-Z]{1,5}(?:\.[A-Z]{1,2})?\b', task_desc)
         symbols = list(dict.fromkeys(found))[:10]
 
     symbol_list = ", ".join(symbols) if symbols else "the requested stocks"
-    lang_instruction = (
-        "Respond in Chinese (中文)." if language in ("zh", "zh-CN", "zh-TW")
-        else "Respond in English."
-    )
+    n_symbols = len(symbols) if symbols else 1
 
-    # Build portfolio context block if we have holdings
+    # ── Portfolio context ──────────────────────────────────────────────────
     portfolio_block = ""
-    holding_map: dict[str, dict] = {}
     if portfolio:
-        lines = ["CLIENT PORTFOLIO (use this for personalised P&L analysis):"]
+        lines = ["CLIENT PORTFOLIO (use for personalised P&L in client_position fields):"]
         for h in portfolio:
             sym = str(h.get("symbol", "")).upper()
             avg_cost = h.get("avgCost")
             shares = h.get("shares")
             currency = h.get("currency", "USD")
             if sym and avg_cost is not None and shares is not None:
-                holding_map[sym] = {"avgCost": avg_cost, "shares": shares, "currency": currency}
                 lines.append(f"  {sym}: {shares} shares @ {currency} {avg_cost:.2f} avg cost")
         if len(lines) > 1:
             portfolio_block = "\n".join(lines)
@@ -408,26 +409,120 @@ def _build_stock_analysis_prompt(
     if context_section:
         context_section = f"\n{context_section}\n"
 
-    # Build explicit per-symbol checklist for Stage 1 and the report outline for Stage 2
+    # ── Stage 1 checklist ──────────────────────────────────────────────────
     symbol_checklist = "\n".join(
         f"  {i+1}. {sym}: get_stock_quote, get_technical_signals, get_options_sentiment, "
         f"get_insider_activity, get_news_sentiment"
         for i, sym in enumerate(symbols)
     ) if symbols else f"  1. {symbol_list}: all five tools"
 
-    symbol_report_outline = "\n\n---\n\n".join(
-        f"## {sym} — [Full Company Name]\n\n"
-        "[Write the complete per-stock block for this symbol as described below.]"
-        for sym in (symbols if symbols else [symbol_list])
+    # ── Stage 2 JSON schema (compact reference) ────────────────────────────
+    held_symbols = []
+    if portfolio:
+        held_symbols = [
+            str(h.get("symbol", "")).upper()
+            for h in portfolio
+            if h.get("symbol") and h.get("avgCost") is not None and h.get("shares") is not None
+        ]
+
+    client_position_note = (
+        f"  Populate client_position for held symbols ({', '.join(held_symbols)}); "
+        f"set to null for non-held symbols."
+        if held_symbols else
+        "  Set client_position to null for all symbols (no holdings provided)."
     )
 
-    return f"""You are a senior equity analyst at a top-tier investment bank. A client has paid for a professional research report.
+    json_schema = f"""{{
+  "executive_summary": "(string, 3-5 sentences: macro backdrop + one-line verdict per stock + top action)",
+  "macro_snapshot": {{
+    "vix": "(string)", "vix_signal": "(string)",
+    "fed_rate": "(string)", "fed_rate_signal": "(string)",
+    "treasury_10y": "(string)", "treasury_10y_signal": "(string)",
+    "cpi_yoy": "(string or '—')", "unemployment": "(string or '—')",
+    "macro_posture": "(string, 1-2 sentences)"
+  }},
+  "analyses": [
+    {{
+      "symbol": "(string, e.g. 'AAPL')",
+      "company_name": "(string)",
+      "rating": "Buy|Hold|Sell",
+      "price_target": (number),
+      "implied_return_pct": (number, e.g. 18.5 means +18.5%),
+      "horizon_months": (integer),
+      "risk_level": "Low|Moderate|High|Very High",
+      "rating_rationale": "(string, 2-3 institutional sentences)",
+      "current_price": (number|null), "week_52_low": (number|null), "week_52_high": (number|null),
+      "market_cap": "(string|null, e.g. '2.85T')",
+      "pe_trailing": (number|null), "pe_forward": (number|null), "peg": (number|null),
+      "analyst_target": (number|null), "analyst_upside_pct": (number|null),
+      "revenue_growth_pct": (number|null), "gross_margin_pct": (number|null),
+      "beta": (number|null), "short_float_pct": (number|null),
+      "fundamentals_commentary": "(string, 2-3 sentences on valuation vs sector/history)",
+      "rsi_14": (number|null), "rsi_14_signal": "(string|null)",
+      "rsi_weekly": (number|null), "rsi_weekly_signal": "(string|null)",
+      "macd_signal": "(string|null)",
+      "bollinger_position": (number|null, 0.0=lower band 1.0=upper band),
+      "bollinger_signal": "(string|null)",
+      "ma_50": (number|null), "ma_200": (number|null),
+      "ma_cross": "(string|null: 'Golden Cross'|'Death Cross'|'None')",
+      "adx": (number|null), "adx_signal": "(string|null)",
+      "obv_trend": "(string|null)", "atr_pct": (number|null), "var_95_pct": (number|null),
+      "technicals_commentary": "(string, 2-3 sentences on overall technical picture)",
+      "upside_catalysts": ["(string, numbered prose, mechanism + timeframe)", "(string)", "(string)"],
+      "principal_risks": ["(string, numbered prose, trigger + impact)", "(string)", "(string)"],
+      "insider_activity": "(string, e.g. '3 buy transactions by CEO (90 days)')",
+      "options_pcr": (number|null), "implied_vol_pct": (number|null),
+      "news_sentiment_score": (number|null, -1.0 to +1.0),
+      "top_headline": "(string|null)",
+      "sentiment_summary": "(string, 2-3 sentences synthesising all sentiment signals)",
+      "client_position": {{
+        "shares": (number), "avg_cost": (number), "unrealised_pnl_pct": (number),
+        "stop_loss": (number), "stop_loss_basis": "(string, e.g. 'MA-200 at $175.80')",
+        "action_summary": "(string, one sentence recommendation for this position)"
+      }} or null
+    }}
+  ],
+  "portfolio_actions": [
+    {{
+      "priority": (integer, 1=highest), "action": "Trim|Add|New Buy|Hold",
+      "symbol": "(string)", "quantity": "(string, e.g. '20 shares' or 'Reduce by 15%')",
+      "price_level": "(string, e.g. 'Current ~$185' or 'On pullback to $170')",
+      "capital_impact": "(string, e.g. 'Free ~$3,600')", "rationale": "(string, one sentence)"
+    }}
+  ],
+  "stop_losses": [
+    {{
+      "symbol": "(string)", "avg_cost": (number), "stop_loss_level": (number),
+      "risk_per_share": (number), "position_size": "(string)",
+      "max_loss_at_stop": "(string, e.g. '$1,000 (10.8%)')",
+      "technical_basis": "(string, e.g. 'MA-200 at $175.80')"
+    }}
+  ],
+  "watchlist": [
+    {{
+      "ticker": "(string)", "company": "(string)",
+      "strategic_rationale": "(string, one sentence)",
+      "key_catalyst": "(string)", "entry_zone": "(string)", "risk": "(string, brief)",
+      "thesis": "(string, exactly 2 sentences)"
+    }}
+  ],
+  "risk_factors": [
+    {{
+      "factor": "(string, e.g. 'Sector Concentration')",
+      "assessment": "Low|Moderate|High",
+      "supporting_observation": "(string, specific data point)",
+      "threshold_to_act": "(string, trigger level or event)"
+    }}
+  ]
+}}"""
+
+    prompt = f"""You are a senior equity analyst at a top-tier investment bank. \
+A client has paid for a professional, actionable research report.
 
 STOCKS TO ANALYZE: {symbol_list}
-NUMBER OF STOCKS: {len(symbols) if symbols else 1} — you must produce a complete analysis block for EACH one.
+NUMBER OF STOCKS: {n_symbols} — you must produce a complete analyses entry for EACH one.
 ANALYSIS TYPE: {analysis_type}
-{lang_instruction}{context_section}
-
+{context_section}
 ════════════════════════════════════════════════════════
 STAGE 1 — COLLECT ALL DATA (complete every call before writing)
 ════════════════════════════════════════════════════════
@@ -437,129 +532,34 @@ Call all five tools for EACH symbol, then call get_macro_context() once:
   + get_macro_context()  (once only)
 
 Do not begin writing until every tool call above has returned a result.
+NEVER fabricate a number — use only values returned by the tools.
 
 ════════════════════════════════════════════════════════
-STAGE 2 — WRITE THE RESEARCH REPORT
+STAGE 2 — OUTPUT JSON
 ════════════════════════════════════════════════════════
-MANDATORY RULES:
-1. Every number, percentage, and price must be taken verbatim from a tool call result. Do not estimate or recall from memory.
-2. Do not leave any placeholder in the final output. If a tool returned no data for a field, write a dash (—).
-3. Do not use emoji or decorative icons anywhere in the report.
-4. Write in formal institutional prose for analysis sections. Use tables for all structured data.
-5. Every recommendation must name a specific price level, share count, or percentage trigger.
-6. You MUST write a complete analysis block for every symbol listed above. Do not stop after the first stock.
+Your ENTIRE final response must be a single raw JSON object.
+- Do NOT output any text before or after the JSON.
+- Do NOT wrap it in markdown code fences (no ```json).
+- Do NOT add comments inside the JSON.
 
----
+The JSON must match this schema exactly:
 
-# Stock Analysis Report
+{json_schema}
 
-## Executive Summary
-
-Write this section FIRST, after all tool calls are complete.
-Three to five sentences covering:
-- Overall market posture (risk-on or risk-off, based on VIX and rate data)
-- A one-line verdict for EACH stock (Rating, Price Target, key reason in one clause)
-- The single most important portfolio action the client should take this week
-
----
-
-## Market Snapshot
-
-Write a five-row table: Indicator | Value | Signal.
-Use exact values from get_macro_context().
-Rows: VIX, Fed Funds Rate (or 3-month T-bill rate if Fed Funds unavailable), 10-Year Treasury Yield, CPI YoY (write "—" if unavailable), Unemployment Rate (write "—" if unavailable).
-Signal column: one concise phrase per indicator (e.g. "Low volatility — risk appetite supportive").
-Follow with one sentence on overall macro posture and its implication for the portfolio.
-
----
-
-{symbol_report_outline}
-
-For EACH stock block above, write the following sections in full:
-
-**Rating: [Buy / Hold / Sell]** | **Price Target: $[price]** | **Implied Return: [+/-%]** | **Horizon: [N] months** | **Risk: [Low / Moderate / High / Very High]**
-
-Two to three sentences of rating rationale before the tables.
-
-**Rating: [Buy / Hold / Sell]** | **Price Target: $[price]** | **Implied Return: [+/-%]** | **Horizon: [N] months** | **Risk: [Low / Moderate / High / Very High]**
-
-State the rating rationale in two to three sentences of institutional prose before the tables. Reference the key factor driving the rating — whether valuation, technical setup, catalyst timing, or risk asymmetry.
-
-### Fundamentals
-
-Write a table with columns Metric | Value | Context.
-Rows: Current Price, 52-Week Range (low – high), Market Cap, Trailing P/E, Forward P/E, PEG Ratio, Analyst Consensus Target (and implied upside/downside %), Revenue Growth (YoY %), Gross Margin (%), Beta, Short Interest (% of float).
-Context column: note whether each metric is elevated, in-line, or depressed relative to the stock's own history or sector median. Be specific (e.g. "Forward P/E of 24x sits at a 15% premium to the sector median of 21x").
-
-### Technical Analysis
-
-Write a table with columns Indicator | Reading | Signal.
-Rows: RSI-14, RSI (Weekly), MACD, Bollinger Band Position (0.0 = lower band, 1.0 = upper band), MA-50, MA-200, MA Cross (Golden / Death / None), ADX, OBV Trend, ATR (% of price), 1-Day VaR (95%).
-Signal column: state the regime implication in plain language (e.g. RSI-14 of 68 = "approaching overbought — momentum intact but limited headroom").
-
-### Investment Thesis
-
-**Upside Case**
-Enumerate three specific, time-bound catalysts that support the rating. Each point must identify a mechanism, an expected timeframe, and — where the data supports it — a magnitude. Write as numbered points in formal prose, not bullet fragments.
-
-**Principal Risks**
-Enumerate three specific risks that could invalidate the thesis. Each point must identify a trigger event or price level and the expected impact on the stock. Write as numbered points in formal prose.
-
-**Sentiment Indicators**
-One paragraph covering insider transaction activity (Form 4 data: net buyer/seller, number of transactions), options market positioning (put/call ratio, implied volatility vs 30-day historical), news sentiment score and direction, and the single most relevant recent headline. Reference the exact figures returned by the tools.
-
-### Client Position
-(Include this section only if the client holds this stock. Omit entirely if not held.)
-
-Write a two-column summary table (Item | Detail) with rows: Shares Held, Average Cost, Current Price, Unrealised P&L ($ and %), Gain to Price Target ($ and % on position), Recommended Stop-Loss (price and % below current, with one-line rationale).
-
----
-
-## Portfolio Rebalancing
-
-Assess the full client portfolio and provide specific, sequenced instructions. If recommending a new position, name which existing holding to reduce in order to fund it.
-
-### Current Allocation
-
-Write a table: Symbol | Shares | Avg Cost | Current Price | Current Value | Unrealised P&L % | Portfolio Weight % | Assessment.
-Compute Current Value as shares multiplied by current price from tool results.
-Assessment column: Overweight / Fair Weight / Underweight, with one clause explaining why.
-
-### Recommended Actions
-
-Write a prioritised action table: Priority | Action | Symbol | Quantity | Price | Capital Impact | Rationale.
-Action column values: Trim / Add / New Buy / Hold.
-Rationale must reference a specific technical or fundamental finding from the analysis above — not generic language.
-Below the table, write one sentence on net capital impact (cash freed by trims vs cash required for buys) and one sentence on how portfolio concentration changes after execution.
-
-### Stop-Loss Schedule
-
-Write a table: Symbol | Entry / Avg Cost | Stop-Loss Level | Risk Per Share | Position Size | Max Loss at Stop.
-Stop-loss levels must be derived from a technical level identified in the analysis (support, moving average, ATR-based) — state which.
-
----
-
-## Watchlist
-
-Using your equity market knowledge, recommend three to five stocks not currently held that are strategically relevant to this portfolio — sector peers, supply-chain adjacencies, thematic complements, or potential hedges. For each name:
-
-Write a table row: Ticker | Company | Strategic Rationale | Key Catalyst | Attractive Entry Zone | Risk.
-Then write two sentences of investment thesis explaining how this name relates to the client's existing positions and what the risk/reward profile looks like at the entry zone.
-
----
-
-## Risk Summary
-
-Write a table: Risk Factor | Assessment | Threshold to Act.
-Rows: Sector Concentration (note actual % in the largest sector), Rate Sensitivity (beta-weighted), Inter-Holding Correlation, Portfolio VaR (aggregate 1-day 95%), Liquidity Risk (based on ATR and average daily volume).
-Assessment column: Low / Moderate / High with one specific supporting observation.
-Threshold to Act column: name the level or event that would warrant a portfolio adjustment.
-
----
-
-## Disclaimer
-This report is prepared for informational purposes only and does not constitute personalised investment advice or a solicitation to buy or sell any security. The information herein is derived from publicly available data and algorithmic analysis; it is not guaranteed as to accuracy or completeness. Past performance is not indicative of future results. All investments carry risk, including the possible loss of principal. Recipients should conduct independent due diligence and consult a licensed financial adviser before acting on any information contained in this report.
+FIELD RULES:
+1. analyses array must contain EXACTLY {n_symbols} entries, one per symbol in STOCKS TO ANALYZE.
+   Symbols (in order): {symbol_list}
+2. Use null for any field where the tool returned no data — never omit a field.
+3. upside_catalysts and principal_risks must each have EXACTLY 3 items.
+4. rating must be exactly "Buy", "Hold", or "Sell" (capital first letter, no other values).
+5. risk_level must be exactly "Low", "Moderate", "High", or "Very High".
+6. All prices and numbers must come verbatim from tool call results.
+7. watchlist must have 3–5 entries of stocks NOT in the client's current portfolio.
+8. risk_factors must have exactly 5 entries covering: Sector Concentration, Rate Sensitivity,
+   Inter-Holding Correlation, Portfolio VaR (95%), Liquidity Risk.
+{client_position_note}
 """
+    return prompt, symbols
 
 
 def _parse_job_id(raw: Any) -> int:
