@@ -32,7 +32,7 @@ from data_sources import (
     fetch_macro_context,
     fetch_insider_trades,
     fetch_alpha_vantage_sentiment,
-    fetch_newsapi_headlines,
+    fetch_gnews_headlines,
 )
 
 
@@ -84,12 +84,10 @@ def get_insider_activity(symbol: str) -> dict:
 def get_news_sentiment(symbol: str) -> dict:
     """Get news sentiment and recent headlines for a stock. Returns:
     - Alpha Vantage AI sentiment score [-1, 1] with bullish/bearish label (requires ALPHA_VANTAGE_API_KEY)
-    - Top 5 recent news headlines (requires NEWS_API_KEY)
+    - Top 5 recent news headlines from GNews (requires GNEWS_API_KEY)
     Call this to supplement quantitative signals with qualitative narrative."""
     av = fetch_alpha_vantage_sentiment(symbol)
-    # Use company name for NewsAPI search if available from AV data
-    company_name = ""
-    headlines = fetch_newsapi_headlines(symbol, company_name=company_name)
+    headlines = fetch_gnews_headlines(symbol)
     return {
         "symbol": symbol,
         "alpha_vantage_sentiment": av,

@@ -228,31 +228,32 @@ def fetch_alpha_vantage_sentiment(symbol: str) -> dict[str, Any]:
         return {"symbol": symbol, "error": str(e)}
 
 
-# ── NewsAPI — latest headlines ────────────────────────────────────────────────
+# ── GNews — latest headlines ──────────────────────────────────────────────────
 
-def fetch_newsapi_headlines(symbol: str, company_name: str = "") -> dict[str, Any]:
-    """Fetch the most relevant recent news headlines for a stock from NewsAPI.
+def fetch_gnews_headlines(symbol: str, company_name: str = "") -> dict[str, Any]:
+    """Fetch the most relevant recent news headlines for a stock from GNews.io.
 
     Searches by company name (more precise than ticker). Returns raw titles
     so the LLM can incorporate them into its narrative.
 
-    Requires NEWS_API_KEY in environment.
-    Free tier: 100 requests/day.
+    Requires GNEWS_API_KEY in environment.
+    Free tier: 100 requests/day, up to 10 articles per request.
+    Docs: https://gnews.io/docs/v4
     """
-    api_key = os.environ.get("NEWS_API_KEY", "")
+    api_key = os.environ.get("GNEWS_API_KEY", "")
     if not api_key:
-        return {"symbol": symbol, "note": "NEWS_API_KEY not set"}
+        return {"symbol": symbol, "note": "GNEWS_API_KEY not set"}
 
     query = company_name or symbol
     try:
         resp = requests.get(
-            "https://newsapi.org/v2/everything",
+            "https://gnews.io/api/v4/search",
             params={
                 "q": query,
-                "sortBy": "relevancy",
-                "language": "en",
-                "pageSize": "5",
-                "apiKey": api_key,
+                "lang": "en",
+                "max": "5",
+                "sortby": "relevance",
+                "token": api_key,
             },
             timeout=_TIMEOUT,
         )
@@ -263,16 +264,16 @@ def fetch_newsapi_headlines(symbol: str, company_name: str = "") -> dict[str, An
         return {
             "symbol": symbol,
             "query": query,
-            "total_results": data.get("totalResults", 0),
+            "total_results": data.get("totalArticles", len(articles)),
             "headlines": [
                 {
                     "title": a.get("title", ""),
                     "source": (a.get("source") or {}).get("name", ""),
                     "published": (a.get("publishedAt") or "")[:10],
                 }
-                for a in articles[:5]
+                for a in articles
             ],
         }
     except Exception as e:
-        logger.warning("NewsAPI fetch failed for %s: %s", symbol, e)
+        logger.warning("GNews fetch failed for %s: %s", symbol, e)
         return {"symbol": symbol, "error": str(e)}
