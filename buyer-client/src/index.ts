@@ -28,6 +28,7 @@ import { GuardUserMemory, buildTaskFromMemory } from "./uomp.js";
 import { negotiate, buildJobDescription, notifyFunded } from "./negotiate.js";
 import { ERC8183Buyer } from "./erc8183.js";
 import { startGatewayRelay, type GatewayRelay } from "./gateway.js";
+import { saveReport } from "./pdf-report.js";
 
 // ── Config from environment ──────────────────────────────────────────────────
 const KEYSTORE_PATH  = process.env["KEYSTORE_PATH"]  ?? "../stockanalyst/.studio/wallets/0x1FF095E1C5Cf4bC72a3DC54be17B6cf85043Fb67.json";
@@ -191,6 +192,20 @@ async function main(): Promise<void> {
             console.log("│ " + line);
           }
           console.log("└" + "─".repeat(52) + "┘");
+
+          // Save HTML + PDF versions of the report
+          console.log("\n  Generating PDF report...");
+          try {
+            const { pdfPath, htmlPath } = await saveReport(reportText, buy.jobId.toString(), symbols);
+            console.log(`  ✓ HTML report  ${htmlPath}`);
+            if (pdfPath) {
+              console.log(`  ✓ PDF report   ${pdfPath}`);
+            } else {
+              console.log("  ℹ  PDF skipped (puppeteer/Chrome unavailable) — HTML report saved.");
+            }
+          } catch (pdfErr) {
+            console.log(`  ⚠  Report save failed: ${pdfErr}`);
+          }
         } else {
           console.log(`  (HTTP ${resp.status} fetching report — check URL manually)`);
         }
