@@ -240,7 +240,7 @@ async def _run_llm(prompt: str, *, session_id: str) -> str:
     ):
         if event.is_final_response() and event.content:
             for p in event.content.parts:
-                if p.text:
+                if p.text and not getattr(p, "thought", False):
                     parts.append(p.text)
     return "\n".join(parts).strip()
 

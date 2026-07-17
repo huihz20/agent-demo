@@ -60,7 +60,7 @@ The agent uses a disciplined two-stage workflow to prevent hallucination:
 
 ```
 Stage 1 — Data Collection (tool calls, no text output)
-  For each symbol:
+  For EACH symbol (explicit per-symbol checklist in the prompt):
     get_stock_quote()        → price, PE, PB, PEG, beta, analyst target
     get_technical_signals()  → all 10 indicators above
     get_options_sentiment()  → put/call ratio, implied vol
@@ -72,9 +72,20 @@ Stage 1 — Data Collection (tool calls, no text output)
 Stage 2 — Report Writing (structured Markdown, no new fetches)
   Only uses numbers returned by Stage 1 tools.
   Never fabricates a price, RSI value, or sentiment score.
+  Must produce a complete analysis block for EVERY symbol — enforced by
+  an explicit per-symbol report outline and MANDATORY RULE #6.
 ```
 
 This separation is enforced in the agent instruction: the LLM is told to collect all data first, then write. Each metric in the report maps to a specific tool call result.
+
+### Extended Thinking
+
+The agent runs on **Kimi K2.6** (`kimi-k2.6`, 256k context window) via `api.moonshot.cn`. This model supports extended thinking: the LLM reasons through the analysis before writing, which improves recommendation quality and consistency.
+
+- Thinking content is **filtered from the output** — only the final formatted report reaches the buyer
+- Analysis for a multi-stock portfolio typically takes **5–15 minutes** depending on the number of symbols
+- The delivery timeout is set to **1800s (30 minutes)** to accommodate deep analysis sessions
+- The 256k context window comfortably fits tool call results for 10+ symbols plus the full report
 
 ### Report Structure
 
@@ -282,7 +293,7 @@ npm run dev
 | 2 | `negotiate` | OAuth2 token → A2A → signed quote 1.0 U |
 | 3 | On-chain buy | createJob → registerJob → setBudget → approve → fund |
 | 4 | `notify_funded` | Tunnel URL + token + portfolio holdings + risk profile → seller ACK |
-| 5 | Seller works | Stage 1: 5-source data collection → Stage 2: structured report |
+| 5 | Seller works | Stage 1: data collection → Stage 2: kimi-k2.6 extended thinking + report (~5–15 min) |
 | 6 | Fetch report | Tunnel URL → local relay → report displayed inline |
 | 7 | Settle | After 24h dispute window: `bag erc8183 settle <job_id>` |
 
@@ -388,6 +399,15 @@ Agent 采用严格的两阶段流程，防止幻觉：
 ```
 
 这个分离由 Agent 的 instruction 强制执行：LLM 被明确要求先收集所有数据，再开始撰写。报告中每个数字都对应一次具体的工具调用结果。
+
+### 扩展思维模式
+
+Agent 使用 **Kimi K2.6**（`kimi-k2.6`，256k 上下文窗口）通过 `api.moonshot.cn` 提供分析。该模型支持扩展思维：在撰写报告之前，LLM 会对分析进行深度推理，从而显著提升建议质量和一致性。
+
+- 思维过程内容会被**过滤掉**——只有最终格式化的报告会发给买家（通过 ADK `Part.thought` 过滤器实现）
+- 多股票组合分析通常需要 **5–15 分钟**，具体取决于股票数量
+- 交付超时设置为 **1800 秒（30 分钟）**，以适应思维模式下的深度分析
+- 256k 上下文窗口可轻松容纳 10 个以上股票的工具调用结果和完整报告
 
 ### 报告结构
 

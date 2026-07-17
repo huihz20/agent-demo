@@ -65,7 +65,7 @@ def _env_seconds(name: str, default: int) -> float:
 # VM pinned to its 8h max-lifetime, billing memory the whole time. A timed-out
 # job is treated as TRANSIENT (not dropped): the funded job stays on-chain and a
 # later sweep re-delivers it idempotently.
-_JOB_DELIVERY_TIMEOUT_SECONDS = _env_seconds("NOTIFY_DELIVERY_TIMEOUT_SECONDS", 600)
+_JOB_DELIVERY_TIMEOUT_SECONDS = _env_seconds("NOTIFY_DELIVERY_TIMEOUT_SECONDS", 1800)
 _SWEEP_TIMEOUT_SECONDS = _env_seconds("NOTIFY_SWEEP_TIMEOUT_SECONDS", 60)
 _PREVERIFY_TIMEOUT_SECONDS = _env_seconds("NOTIFY_PREVERIFY_TIMEOUT_SECONDS", 30)
 

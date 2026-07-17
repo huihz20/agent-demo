@@ -13,7 +13,7 @@ The agent aggregates 5 independent data sources (yfinance, FRED macro, SEC EDGAR
 
 Payment is trustless: the buyer's 1.0 U is locked in a smart contract escrow and only released after the agent submits a verifiable deliverable on-chain.
 
-- **Seller** (`stockanalyst/`) — stock analysis agent deployed on BNB Chain platform: two-stage LLM (data collection → report writing), 5-source data pipeline, portfolio-personalized output
+- **Seller** (`stockanalyst/`) — stock analysis agent deployed on BNB Chain platform: two-stage LLM with **kimi-k2.6** extended thinking (data collection → deep analysis → report writing), 5-source data pipeline, portfolio-personalized multi-stock output. Analysis takes ~5–15 min; thinking content is filtered from output.
 - **Buyer** (`buyer-client/`) — TypeScript client that reads the user's portfolio and cost basis from a local UOMP Guard, pays via ERC-8183 escrow, and receives the report through a Cloudflare Tunnel reverse gateway
 
 ## Architecture
@@ -43,7 +43,7 @@ Payment is trustless: the buyer's 1.0 U is locked in a smart contract escrow and
         │  Cloudflare Tunnel ──────────────► https://xxx.trycloudflare.com
         │                                          │
         ├─[4]─ notify_funded ────────────► seller agent
-        │      + tunnel URL + token         ├─ LLM analysis (Kimi)
+        │      + tunnel URL + token         ├─ kimi-k2.6 extended thinking (~5-15min)
         │                                   ├─[5]─ submit_result ─► BSC Testnet
         │                                   └─[6]─ POST report ───► Cloudflare Tunnel
         │                                                                 │
@@ -67,7 +67,7 @@ Payment is trustless: the buyer's 1.0 U is locked in a smart contract escrow and
 | 2 | Buyer→Seller | A2A negotiate (OAuth2) → signed quote 1.0 U |
 | 3 | Buyer→Chain | createJob → registerJob → setBudget → approve → fund |
 | 4 | Buyer→Seller | notify_funded with Cloudflare Tunnel URL + token |
-| 5 | Seller | LLM analysis → submit_result → POST report to tunnel |
+| 5 | Seller | kimi-k2.6 extended thinking + report (~5–15 min) → submit_result → POST to tunnel |
 | 6 | Buyer | Poll chain → SUBMITTED → fetch report from local relay |
 | 7 | Buyer→Chain | settle (after 24h dispute window) |
 
