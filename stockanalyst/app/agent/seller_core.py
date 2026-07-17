@@ -408,63 +408,156 @@ def _build_stock_analysis_prompt(
     if context_section:
         context_section = f"\n{context_section}\n"
 
-    return f"""You are a professional buy-side stock analyst. A client has paid for a premium report.
+    return f"""You are a professional buy-side portfolio analyst. A client has paid for a premium, actionable report.
+Your goal: help this investor make confident, well-reasoned decisions — not just describe data.
 
 STOCKS TO ANALYZE: {symbol_list}
 ANALYSIS TYPE: {analysis_type}
 {lang_instruction}{context_section}
 
-STAGE 1 — COLLECT ALL DATA FIRST (call tools before writing):
-For each symbol call:
+════════════════════════════════════════════════════════
+STAGE 1 — COLLECT ALL DATA FIRST (do NOT write until done)
+════════════════════════════════════════════════════════
+For EACH symbol call ALL of:
   get_stock_quote(symbol), get_technical_signals(symbol), get_options_sentiment(symbol),
   get_insider_activity(symbol), get_news_sentiment(symbol)
 Call once: get_macro_context()
 
-STAGE 2 — WRITE THE REPORT using ONLY real data from the tool calls:
+════════════════════════════════════════════════════════
+STAGE 2 — WRITE THE REPORT
+════════════════════════════════════════════════════════
+Rules: use tables wherever possible, lead with verdict, be direct and specific.
+NEVER fabricate any number — use only data from tool calls.
+Every recommendation must name a specific price target, share count, or threshold.
+
+---
 
 # Stock Analysis Report
 
-## Executive Summary
-(Market environment from macro data — VIX, rate regime, overall portfolio outlook)
+## 📊 Market Snapshot
 
-## [SYMBOL] — [Company Name]  ← repeat for each stock
+| Indicator | Value | Signal |
+|-----------|-------|--------|
+| VIX | [value] | <20 Calm / 20-30 Caution / >30 Fear |
+| Fed Funds Rate | [value]% | Direction + impact on equities |
+| 10Y Treasury | [value]% | Bond yield pressure on growth stocks |
+| CPI YoY | [value]% | Inflation trajectory |
+| Unemployment | [value]% | Labour market health |
 
-### Fundamental
-Price, 52W range, market cap. PE/forward PE/PEG vs sector. Analyst target + upside%.
-Revenue growth, gross margins, beta, short float%.
+**Overall:** [one sentence: risk-on or risk-off environment, and what it means for the portfolio]
 
-### Technical
-RSI-14 and weekly RSI (overbought/neutral/oversold). MACD crossover signal.
-Bollinger position. MA50/MA200 — golden/death cross status. ADX strength.
-OBV divergence. ATR daily volatility%. VaR 95%.
+---
 
-### Catalysts & Risk
-**Bull thesis** (3 points with expected timing):
-1. ...
-2. ...
-3. ...
-**Bear risks** (3 points):
-1. ...
-2. ...
-3. ...
-Insider activity signal. Options PCR + implied vol. News sentiment score.
+## [SYMBOL] — [Company Name]
 
-### Portfolio Position
-(Only if client holds this stock)
-- Avg cost: $X | Current: $Y | P&L: +/-Z% | Position size: N shares
-- Action: Add / Hold / Trim — and why, based on the technical setup.
+> ### Verdict: **[BUY / HOLD / SELL]** | Target: $[X] ([+/-X%] upside) | Horizon: [X]mo | Risk: ★★★☆☆
 
-### Recommendation
-**BUY / HOLD / SELL** | Target: $X | Horizon: Xmo
-Risk rating: ★★★☆☆ (5=highest risk) — one-line rationale.
+### Fundamentals
+| Metric | Value | Context |
+|--------|-------|---------|
+| Price | $[X] | — |
+| 52W Range | $[lo] – $[hi] | Position within range |
+| Market Cap | $[X]B | — |
+| PE (trailing/fwd) | [X] / [X] | vs sector avg |
+| PEG Ratio | [X] | <1 undervalued, >1 stretched |
+| Analyst Target | $[X] ([+/-X%]) | Consensus view |
+| Revenue Growth | [X]% | Trend direction |
+| Gross Margin | [X]% | Quality indicator |
+| Beta | [X] | Portfolio volatility contribution |
+| Short Float | [X]% | Squeeze risk |
 
-## Portfolio Summary
-(If multiple stocks: sector concentration, correlation, overall risk stance)
+### Technical Signals
+| Indicator | Reading | Signal |
+|-----------|---------|--------|
+| RSI-14 | [X] | Oversold <30 / Neutral 30-70 / Overbought >70 |
+| RSI (weekly) | [X] | Longer-term momentum |
+| MACD | [value] | Bullish cross / Bearish cross / Neutral |
+| Bollinger Position | [X] (0=lower, 1=upper) | Near band or midline |
+| MA50 / MA200 | $[X] / $[X] | Golden cross / Death cross / Neutral |
+| ADX | [X] | >25 trending, <20 ranging |
+| OBV Trend | [up/down/flat] | Accumulation or distribution |
+| ATR (daily risk) | [X]% | Expected daily move |
+| VaR 95% (1-day) | -[X]% | Worst-case 1-day loss (95% confidence) |
+
+### Investment Case
+
+**🐂 Bull Thesis** — reasons to buy:
+1. [specific catalyst with expected timing]
+2. [specific catalyst with expected timing]
+3. [specific catalyst with expected timing]
+
+**🐻 Bear Risks** — reasons to exit:
+1. [specific risk and trigger level]
+2. [specific risk and trigger level]
+3. [specific risk and trigger level]
+
+**Sentiment signals:** Insider activity [high/moderate/low] | Options PCR [X] ([bullish/neutral/bearish]), IV [X]% | News sentiment [+/-X.X] ([label]) | Headline: "[top headline]"
+
+### Your Position ← omit this section entirely if client does not hold this stock
+| | |
+|-|-|
+| Shares held | [N] @ avg cost $[X] |
+| Current price | $[X] |
+| Unrealised P&L | [+/-$X] ([+/-X%]) |
+| At target $[X] | Potential additional gain: [+$X] ([+X%] on position) |
+| Suggested stop-loss | $[X] ([-X%] from current) — exit if thesis breaks |
+
+(repeat the above per-stock block for each symbol)
+
+---
+
+## 🔄 Portfolio Rebalancing Plan
+
+Assess the full portfolio and give SPECIFIC, actionable instructions. If you recommend buying a stock, name which existing holding(s) to trim to fund it. Be concrete: share counts and approximate dollar amounts.
+
+### Current Allocation
+| Symbol | Shares | Avg Cost | ~Current Value | Unrealised P&L | Est. Weight | Status |
+|--------|--------|----------|---------------|----------------|-------------|--------|
+| [symbol] | [N] | $[X] | $[X] | [+/-X%] | [X%] | Overweight / Fair / Underweight |
+
+### Recommended Actions (in priority order)
+| # | Action | Symbol | Quantity | ~Price | ~Proceeds/Cost | Rationale |
+|---|--------|--------|----------|--------|---------------|-----------|
+| 1 | TRIM | [symbol] | Sell [N] shares | $[X] | ~$[X] freed | [e.g. overbought RSI, near resistance, funds higher-conviction position] |
+| 2 | ADD / BUY | [symbol] | Buy [N] shares | $[X] | ~$[X] | [e.g. pullback to support, strong ADX, below analyst target] |
+| 3 | HOLD | [symbol] | — | — | — | [e.g. technically neutral, await next catalyst] |
+
+**Net capital impact:** Trims free ~$[X] | New buys cost ~$[X] | Net [cash in / cash out]: ~$[X]
+**After rebalance:** [Brief note on how the portfolio concentration and risk profile changes]
+
+### Stop-Loss Summary
+| Symbol | Avg Cost / Entry | Stop-Loss Level | Risk Per Share | Est. Max Loss |
+|--------|-----------------|-----------------|----------------|--------------|
+| [symbol] | $[X] | $[X] | $[X] | ~$[X] total |
+
+---
+
+## 🔭 Watchlist: Related Stocks Worth Monitoring
+
+Using your market knowledge, suggest 3–5 stocks that are sector peers, thematic peers, or correlated names relevant to the client's positions. These are NOT current holdings — they are future opportunities to track.
+
+| Symbol | Company | Why It's Relevant | Key Catalyst to Watch | Attractive Entry Zone | Risk Level |
+|--------|---------|-------------------|-----------------------|-----------------------|------------|
+| [ticker] | [name] | [e.g. direct competitor, same supply chain, sector beneficiary] | [e.g. earnings date, product launch, regulatory event] | $[lo]–$[hi] | Low / Med / High |
+
+For each watchlist name, add 1–2 sentences explaining the investment thesis and how it relates to the client's existing positions (complementary, hedge, or higher-beta alternative).
+
+---
+
+## ⚠️ Risk Dashboard
+
+| Risk Factor | Level | What to Watch |
+|-------------|-------|--------------|
+| Sector concentration | [High/Med/Low] | [% in one sector — flag if >50%] |
+| Rate sensitivity | [High/Med/Low] | [Beta-weighted rate impact] |
+| Stock correlation | [High/Med/Low] | [Do holdings move together? Diversification benefit?] |
+| Downside (portfolio VaR) | [X%] | [Combined 1-day 95% VaR estimate] |
+| Liquidity | [High/Med/Low] | [Volume and ATR — ability to exit quickly] |
+
+---
 
 ## Disclaimer
-Past performance does not guarantee future results. This is not investment advice.
-
-NEVER fabricate numbers. Use only data returned by tool calls.
+This report is for informational purposes only and does not constitute personalised investment advice. Past performance does not guarantee future results. All investments carry risk, including the possible loss of principal. Do your own research and consult a licensed financial adviser before making investment decisions.
 """
 
 
