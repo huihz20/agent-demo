@@ -1,0 +1,51 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy to BNB Chain Platform
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install bnbagent-studio
+        run: |
+          pip install uv
+          uv tool install bnbagent-studio
+
+      - name: Write secrets to .studio/.env.local
+        run: |
+          mkdir -p .studio
+          cat > .studio/.env.local <<EOF
+          WALLET_PASSWORD=${{ secrets.WALLET_PASSWORD }}
+          PIEVERSE_LLM_API_KEY=${{ secrets.PIEVERSE_LLM_API_KEY }}
+          STORAGE_API_URL=${{ secrets.STORAGE_API_URL }}
+          STORAGE_API_KEY=${{ secrets.STORAGE_API_KEY }}
+          EOF
+
+      - name: Install agent deps
+        working-directory: app/agent
+        run: |
+          uv venv .venv --python 3.12
+          uv pip install -e . --python .venv/bin/python
+
+      - name: bag doctor
+        run: app/agent/.venv/bin/bag doctor
+
+      - name: Deploy agent
+        env:
+          BAG_PLATFORM_TOKEN: ${{ secrets.BAG_PLATFORM_TOKEN }}
+        run: app/agent/.venv/bin/bag deploy agent
