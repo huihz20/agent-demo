@@ -201,21 +201,30 @@ class X402Handler:
 
         logger.info("x402 payment verified — streaming analysis for %s", symbols)
         analysis_type = str(req.get("analysis_type") or "comprehensive")
-        await self._stream_sse(send, symbols, analysis_type)
+        portfolio = req.get("portfolio") or []
+        risk_profile = req.get("risk_profile") or {}
+        await self._stream_sse(send, symbols, analysis_type, portfolio=portfolio, risk_profile=risk_profile)
 
-    async def _stream_sse(self, send, symbols: list[str], analysis_type: str) -> None:
+    async def _stream_sse(
+        self, send, symbols: list[str], analysis_type: str,
+        portfolio: list | None = None, risk_profile: dict | None = None,
+    ) -> None:
         """Stream SSE events: progress → report → done."""
         from seller_core import _build_stock_analysis_prompt
 
         # Unique session id per delivery (avoids ADK session collision with ERC-8183 jobs)
         session_id = f"x402-{hashlib.sha256(f'{symbols}:{time.time()}'.encode()).hexdigest()[:12]}"
 
-        # Build prompt (same pipeline as ERC-8183)
+        # Build prompt (same pipeline as ERC-8183, including UOMP portfolio context)
         task_json = json.dumps({
             "task": f"Analyze {', '.join(symbols)}",
             "terms": {"symbols": symbols, "analysis_type": analysis_type},
         })
-        prompt, effective_symbols = _build_stock_analysis_prompt(task_json)
+        prompt, effective_symbols = _build_stock_analysis_prompt(
+            task_json,
+            portfolio=portfolio or [],
+            risk_profile=risk_profile or {},
+        )
 
         # Start SSE response
         await send({

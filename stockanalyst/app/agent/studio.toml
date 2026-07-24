@@ -111,6 +111,17 @@ endpoint = "/x402/analyze"
 # Challenge:   GET /x402/analyze?symbols=AAPL
 # Delivery:    POST /x402/analyze  (X-Payment: <base64 proof>)  → SSE stream
 
+# ── Dual-port deployment (platform-side) ──────────────────────────────────────
+# When `bag deploy` reads port + public = true, it:
+#   1. Sets X402_PORT=<port> in the container env → agent starts a second
+#      uvicorn listener on this port serving ONLY x402 routes (no A2A, no Cognito)
+#   2. Exposes that port as a separate public endpoint (no AgentCore auth gateway)
+#   3. Returns x402_url in `bag deploy info` output
+# This lets the x402 channel (X-Payment auth) coexist with the A2A channel
+# (Cognito Bearer auth) without routing conflicts inside AgentCore.
+port = 9001
+public = true
+
 [deploy.platform]
 terms_accepted_at = "2026-07-16T15:01:53Z"
 slug = "stockanalyst"

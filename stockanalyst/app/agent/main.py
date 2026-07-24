@@ -558,16 +558,17 @@ if __name__ == "__main__":
     import uvicorn
     from bedrock_agentcore.runtime import build_a2a_app
 
+    from x402_handler import X402Handler
+
     app = build_a2a_app(executor, agent_card, ping_handler=_ping_status)
     app = _strip_error_input(app)
 
     # Serve local-storage deliverables at /erc8183/job/{id}/response so that
     # ERC8183_AGENT_URL=http://localhost:9000/erc8183 works in local dev.
-    # The LocalStorageProvider writes job-{id}.json into STORAGE_LOCAL_PATH.
     _inner = app
     _storage_dir = Path(os.environ.get("STORAGE_LOCAL_PATH") or ".agent-data")
 
-    async def _app(scope, receive, send):
+    async def _a2a_app(scope, receive, send):
         if scope["type"] == "http":
             path = scope.get("path", "")
             m = re.match(r"^/erc8183/job/(\d+)/response$", path)
@@ -585,21 +586,52 @@ if __name__ == "__main__":
                 return
         await _inner(scope, receive, send)
 
-    # --- x402 / Binance Pay channel -------------------------------------------
-    # Mount the x402 handler as the outermost ASGI layer so it intercepts
-    # /x402/* before the A2A server, the ERC-8183 local-storage route, and
-    # the JSON-RPC error-hardening middleware. Payment verification and SSE
-    # streaming are fixed code — the LLM sees only the analysis prompt.
-    from x402_handler import X402Handler
-    _app = X402Handler(
-        _app,
-        stream_work=_stream_runner,
-        generator=GENERATOR,
-    )
+    bind_host = os.environ.get("AGENT_BIND_HOST") or "0.0.0.0"
+    a2a_port  = int(os.environ.get("AGENT_PORT")  or "9000")
+    x402_port = int(os.environ.get("X402_PORT")   or "0")
 
-    uvicorn.run(
-        _app,
-        host=os.environ.get("AGENT_BIND_HOST") or "0.0.0.0",
-        port=int(os.environ.get("AGENT_PORT") or "9000"),
-        log_level="info",
-    )
+    if x402_port:
+        # --- Dual-port mode (platform deployment with [payments.x402.seller].public = true) ---
+        #
+        # bag deploy reads studio.toml [payments.x402.seller] port + public, then:
+        #   • sets X402_PORT=<port> in the container env        ← triggers this branch
+        #   • exposes that port as a separate public endpoint   ← no AgentCore Cognito gateway
+        #   • returns x402_url in `bag deploy info` output
+        #
+        # Port layout:
+        #   a2a_port  (9000) → A2A only — behind AgentCore Cognito gateway (ERC-8183 flow)
+        #   x402_port (9001) → x402 only — public, X-Payment auth, no Cognito (x402 flow)
+        #
+        # In local dev X402_PORT is NOT set; the combined single-port mode below is used instead.
+
+        async def _x402_404(scope, receive, send):
+            await send({"type": "http.response.start", "status": 404,
+                        "headers": [(b"content-type", b"application/json")]})
+            await send({"type": "http.response.body", "body": b'{"error":"not found"}'})
+
+        _x402_standalone = X402Handler(
+            _x402_404,
+            stream_work=_stream_runner,
+            generator=GENERATOR,
+        )
+
+        async def _serve_both():
+            a2a_cfg  = uvicorn.Config(_a2a_app,         host=bind_host, port=a2a_port,  log_level="info")
+            x402_cfg = uvicorn.Config(_x402_standalone, host=bind_host, port=x402_port, log_level="info")
+            await asyncio.gather(
+                uvicorn.Server(a2a_cfg).serve(),
+                uvicorn.Server(x402_cfg).serve(),
+            )
+
+        asyncio.run(_serve_both())
+
+    else:
+        # --- Single-port mode (local dev / bag dev) ---
+        # x402 routes and A2A routes share port 9000 via ASGI middleware layering.
+        # AgentCore is not present locally, so x402 is reachable at localhost:9000/x402/*.
+        _combined = X402Handler(
+            _a2a_app,
+            stream_work=_stream_runner,
+            generator=GENERATOR,
+        )
+        uvicorn.run(_combined, host=bind_host, port=a2a_port, log_level="info")
