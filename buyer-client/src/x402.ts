@@ -38,6 +38,14 @@ const AGENT_ENDPOINT = process.env["X402_ENDPOINT"] ?? "http://localhost:9000";
 // Seller wallet address (must match x402_verify.py SELLER_WALLET)
 const SELLER_WALLET = "0x1ff095e1c5cf4bc72a3dc54be17b6cf85043fb67";
 
+// U token on BSC Testnet — EIP-712 domain for EIP-3009 TransferWithAuthorization
+// Set env U_TOKEN_DOMAIN_NAME / U_TOKEN_DOMAIN_VERSION to override if the
+// deployed contract uses different values (verify with token.name()).
+const U_TOKEN_ADDRESS       = "0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565";
+const U_TOKEN_DOMAIN_NAME    = process.env["U_TOKEN_DOMAIN_NAME"]    ?? "U";
+const U_TOKEN_DOMAIN_VERSION = process.env["U_TOKEN_DOMAIN_VERSION"] ?? "1";
+const BSC_TESTNET_CHAIN_ID   = 97;
+
 function hr(label: string): void {
   console.log(`\n${"─".repeat(60)}`);
   console.log(`  ${label}`);
@@ -50,50 +58,75 @@ function banner(lines: string[]): void {
   console.log("═".repeat(60));
 }
 
-// ── x402 payment proof ────────────────────────────────────────────────────────
-
-interface X402Authorization {
-  from: string;
-  to: string;
-  value: string;
-  validAfter: number;
-  validBefore: number;
-  nonce: string;
-}
+// ── x402 v2 payment proof (EIP-712 / EIP-3009) ───────────────────────────────
 
 /**
- * Build and sign an x402 payment authorization.
+ * Build and EIP-712 sign an x402 v2 TransferWithAuthorization proof.
  *
- * The canonical signing message is:
- *   "x402:stockanalyst:v1:{from}:{to}:{value}:{validAfter}:{validBefore}:{nonce}"
+ * Uses EIP-3009 (transferWithAuthorization): the buyer signs typed data over
+ * the U token's EIP-712 domain; the agent verifies locally then submits to the
+ * Binance Pay x402 facilitator which calls token.transferWithAuthorization()
+ * on-chain — no pre-approval required, no gas paid by the buyer.
  *
- * ethers.js `signMessage()` applies EIP-191 personal_sign ("\x19Ethereum Signed Message:\n...")
- * which is exactly what x402_verify.py's _verify_eip191() expects.
+ * ethers v6 `signTypedData(domain, types, value)` produces the correct
+ * EIP-712 signature that x402_verify.py's Account._recover_hash() expects.
  */
 async function buildPaymentProof(
   wallet: Wallet,
   priceWei: string = "1000000000000000000",
   ttlSeconds: number = 600,
 ): Promise<string> {
-  const auth: X402Authorization = {
-    from: wallet.address.toLowerCase(),
-    to: SELLER_WALLET,
-    value: priceWei,
-    validAfter: 0,
-    validBefore: Math.floor(Date.now() / 1000) + ttlSeconds,
-    nonce: "0x" + randomBytes(8).toString("hex"),
+  const now   = Math.floor(Date.now() / 1000);
+  const nonce = "0x" + randomBytes(32).toString("hex");  // bytes32
+
+  const authorization = {
+    from:        wallet.address.toLowerCase(),
+    to:          SELLER_WALLET,
+    value:       priceWei,
+    validAfter:  "0",
+    validBefore: String(now + ttlSeconds),
+    nonce,
   };
 
-  const msg =
-    `x402:stockanalyst:v1:${auth.from}:${auth.to}:${auth.value}` +
-    `:${auth.validAfter}:${auth.validBefore}:${auth.nonce}`;
+  // EIP-712 domain (must match x402_verify.py _domain_separator())
+  const domain = {
+    name:              U_TOKEN_DOMAIN_NAME,
+    version:           U_TOKEN_DOMAIN_VERSION,
+    chainId:           BSC_TESTNET_CHAIN_ID,
+    verifyingContract: U_TOKEN_ADDRESS,
+  };
 
-  const sig = await wallet.signMessage(msg);
+  // EIP-712 types (TransferWithAuthorization — EIP-3009)
+  const types = {
+    TransferWithAuthorization: [
+      { name: "from",        type: "address" },
+      { name: "to",          type: "address" },
+      { name: "value",       type: "uint256" },
+      { name: "validAfter",  type: "uint256" },
+      { name: "validBefore", type: "uint256" },
+      { name: "nonce",       type: "bytes32" },
+    ],
+  };
 
+  // signTypedData encodes uint256 fields as BigInt
+  const sig = await wallet.signTypedData(domain, types, {
+    from:        authorization.from,
+    to:          authorization.to,
+    value:       BigInt(authorization.value),
+    validAfter:  BigInt(authorization.validAfter),
+    validBefore: BigInt(authorization.validBefore),
+    nonce:       authorization.nonce,   // bytes32 as "0x..." hex string
+  });
+
+  // x402 v2 wire format
   const proof = {
-    scheme: "exact",
-    network: "bsc-testnet",
-    payload: { authorization: auth, signature: sig },
+    x402Version: 2,
+    scheme:      "exact",
+    network:     `eip155:${BSC_TESTNET_CHAIN_ID}`,
+    payload: {
+      signature:     sig,
+      authorization,
+    },
   };
 
   return Buffer.from(JSON.stringify(proof)).toString("base64");
@@ -251,15 +284,16 @@ async function main(): Promise<void> {
     `x402 endpoint: ${AGENT_ENDPOINT}`,
     `Buyer:         ${wallet.address}`,
     `Symbols:       ${symbols.join(", ")}`,
-    "Payment:       x402 / EIP-191 signed (no on-chain tx)",
+    "Payment:       x402 v2 / EIP-712 EIP-3009 (Binance Pay facilitator)",
     "Delivery:      SSE stream (no polling needed)",
   ]);
 
   // ── Sign payment proof ───────────────────────────────────────────────────
-  hr("Step 2: Sign x402 payment authorization (EIP-191, no on-chain tx)");
+  hr("Step 2: Sign x402 v2 payment authorization (EIP-712 EIP-3009)");
   const proof = await buildPaymentProof(wallet);
-  console.log("  ✓ Payment proof signed");
+  console.log("  ✓ EIP-712 proof signed (TransferWithAuthorization)");
   console.log(`  ✓ Paying:   1.0 U → ${SELLER_WALLET}`);
+  console.log(`  ✓ Token:    ${U_TOKEN_ADDRESS} (BSC Testnet)`);
   console.log(`  ✓ Valid for: 10 minutes`);
 
   // ── Stream analysis ──────────────────────────────────────────────────────

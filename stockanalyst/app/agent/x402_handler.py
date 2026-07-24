@@ -39,16 +39,81 @@ Both channels share the same LLM analysis pipeline.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
+import os
 import time
 import urllib.parse
 from typing import Any, AsyncGenerator, Callable
 
-from x402_verify import build_payment_challenge, verify_payment_proof
+import httpx
+
+from x402_verify import (
+    CHAIN_ID, MIN_PRICE_WEI, PRICE_WEI, SELLER_WALLET, U_TOKEN_BSC_TESTNET,
+    build_payment_challenge, verify_payment_proof,
+)
 
 logger = logging.getLogger("seller-agent.x402")
+
+# Binance Pay x402 facilitator endpoint.
+# When set, the agent POSTs the signed proof here after local verification;
+# the facilitator executes the on-chain transferWithAuthorization and returns
+# a transaction hash. When unset, the agent runs in demo mode (signature-only,
+# no actual token transfer).
+FACILITATOR_URL = os.environ.get("X402_FACILITATOR_URL", "").rstrip("/")
+
+
+async def _settle_via_facilitator(proof_b64: str) -> tuple[bool, str]:
+    """Call Binance Pay x402 facilitator to execute on-chain settlement.
+
+    Returns (True, txHash) on success, (False, error_reason) on failure.
+    In demo mode (FACILITATOR_URL unset) returns (True, "") immediately.
+    """
+    if not FACILITATOR_URL:
+        logger.info(
+            "x402: X402_FACILITATOR_URL not set — demo mode "
+            "(signature verified, no on-chain transfer)"
+        )
+        return True, ""
+
+    try:
+        raw   = base64.b64decode(proof_b64.strip())
+        proof = json.loads(raw)
+    except Exception as exc:
+        return False, f"could not decode proof for facilitator: {exc}"
+
+    payload = {
+        "x402Version": 2,
+        "paymentPayload": proof,
+        "paymentRequirements": {
+            "scheme":             "exact",
+            "network":            f"eip155:{CHAIN_ID}",
+            "maxAmountRequired":  str(PRICE_WEI),
+            "asset":              U_TOKEN_BSC_TESTNET,
+            "payTo":              SELLER_WALLET.lower(),
+            "maxTimeoutSeconds":  60,
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{FACILITATOR_URL}/settle",
+                json=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            data = resp.json()
+        if data.get("success"):
+            txhash = str(data.get("transaction") or "")
+            logger.info("x402 facilitator settled: txHash=%s", txhash)
+            return True, txhash
+        reason = str(data.get("errorReason") or data.get("error") or "facilitator rejected")
+        logger.warning("x402 facilitator rejected: %s", reason)
+        return False, reason
+    except Exception as exc:
+        logger.exception("x402 facilitator call failed")
+        return False, str(exc)
 
 
 class X402Handler:
@@ -105,15 +170,18 @@ class X402Handler:
     async def _handle_price(self, scope, send) -> None:
         """GET /x402/price — price info without payment."""
         challenge = build_payment_challenge([], "")
+        accept    = (challenge.get("accepts") or [{}])[0]
         await _send_json(send, 200, {
-            "price_u": "1.0",
-            "price_wei": challenge["maxAmountRequired"],
-            "min_price_u": "0.5",
-            "min_price_wei": str(5 * 10**17),
-            "asset": challenge["asset"],
-            "network": challenge["network"],
-            "payTo": challenge["payTo"],
-            "signingMessage": challenge["extra"]["signingMessage"],
+            "x402Version":  2,
+            "price_u":      "1.0",
+            "price_wei":    accept.get("maxAmountRequired", str(PRICE_WEI)),
+            "min_price_u":  "0.5",
+            "min_price_wei": str(MIN_PRICE_WEI),
+            "asset":        accept.get("asset"),
+            "network":      accept.get("network"),
+            "payTo":        accept.get("payTo"),
+            "signingScheme": "eip3009",
+            "facilitator":  FACILITATOR_URL or "(demo mode — no on-chain settlement)",
         })
 
     async def _handle_challenge(self, scope, send) -> None:
@@ -189,13 +257,23 @@ class X402Handler:
             await send({"type": "http.response.body", "body": body, "more_body": False})
             return
 
-        # Verify payment (fixed code — never LLM)
+        # Step 1: verify EIP-712 signature locally (fast, no I/O)
         ok, err = verify_payment_proof(payment_header)
         if not ok:
             logger.warning("x402 payment rejected for %s: %s", symbols, err)
             await _send_json(send, 402, {
                 "error": "Payment verification failed",
                 "detail": err,
+            })
+            return
+
+        # Step 2: settle via Binance Pay facilitator (on-chain transfer)
+        ok, txhash_or_err = await _settle_via_facilitator(payment_header)
+        if not ok:
+            logger.warning("x402 facilitator settlement failed for %s: %s", symbols, txhash_or_err)
+            await _send_json(send, 402, {
+                "error": "Payment settlement failed",
+                "detail": txhash_or_err,
             })
             return
 

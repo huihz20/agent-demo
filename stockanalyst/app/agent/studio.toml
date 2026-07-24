@@ -122,6 +122,15 @@ endpoint = "/x402/analyze"
 port = 9001
 public = true
 
+# Binance Pay x402 facilitator — executes on-chain transferWithAuthorization
+# after the agent verifies the EIP-712 signature locally.
+# When unset: demo mode (signature-only, no actual token transfer).
+# Set to the Binance Pay facilitator endpoint once available:
+#   bag env set X402_FACILITATOR_URL https://pay.binance.com/x402/v1
+# U token EIP-712 domain (default "U" / "1" — set only if contract differs):
+#   bag env set U_TOKEN_DOMAIN_NAME U
+#   bag env set U_TOKEN_DOMAIN_VERSION 1
+
 [deploy.platform]
 terms_accepted_at = "2026-07-16T15:01:53Z"
 slug = "stockanalyst"
