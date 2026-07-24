@@ -124,9 +124,14 @@ public = true
 
 # Binance Pay x402 facilitator — executes on-chain transferWithAuthorization
 # after the agent verifies the EIP-712 signature locally.
-# When unset: demo mode (signature-only, no actual token transfer).
 # Set to the Binance Pay facilitator endpoint once available:
 #   bag env set X402_FACILITATOR_URL https://pay.binance.com/x402/v1
+#
+# LOCAL TESTING ONLY — explicit demo mode opt-in (no on-chain transfer):
+#   bag env set X402_DEMO_MODE 1
+# NEVER set X402_DEMO_MODE in production — signatures are verified but no tokens
+# are transferred, so any wallet can receive paid analysis without paying.
+#
 # U token EIP-712 domain (default "U" / "1" — set only if contract differs):
 #   bag env set U_TOKEN_DOMAIN_NAME U
 #   bag env set U_TOKEN_DOMAIN_VERSION 1

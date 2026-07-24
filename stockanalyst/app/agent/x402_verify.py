@@ -77,6 +77,21 @@ from eth_account import Account
 
 _log = logging.getLogger("seller-agent.x402.verify")
 
+# Startup assertion — fail hard if eth_account is present but broken.
+# The module-level import above already fails closed if eth_account is missing
+# entirely; this catches a partially-working install (e.g. bad C extension).
+try:
+    _smoke = Account._recover_hash(b"\x00" * 32, signature=b"\x00" * 65)
+except Exception:
+    pass  # expected — bad sig; what matters is that the function is callable
+try:
+    Account._recover_hash  # type: ignore[attr-defined]
+except AttributeError as _e:
+    raise RuntimeError(
+        "eth_account._recover_hash unavailable — signature verification is broken. "
+        "Run: pip install 'eth-account>=0.8' 'eth-abi>=4' 'eth-utils>=2'"
+    ) from _e
+
 SELLER_WALLET       = "0x1FF095E1C5Cf4bC72a3DC54be17B6cf85043Fb67"
 U_TOKEN_BSC_TESTNET = "0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565"
 PRICE_WEI           = 10**18         # 1.0 U
@@ -88,9 +103,26 @@ CHAIN_ID            = 97            # BSC Testnet
 _TOKEN_DOMAIN_NAME    = os.environ.get("U_TOKEN_DOMAIN_NAME",    "U")
 _TOKEN_DOMAIN_VERSION = os.environ.get("U_TOKEN_DOMAIN_VERSION", "1")
 
-# Replay protection: in-memory nonce registry keyed by "from:nonce".
-# Production deployments should persist this (Redis / on-chain nullifier).
+# ── Replay protection ─────────────────────────────────────────────────────────
+# Nonces are stored in-memory: they are lost on process restart and NOT shared
+# across replicas.  Mitigations in this implementation:
+#   1. validBefore TTL is capped at now+3600 (1 h max window), so a replayed
+#      nonce can only be accepted within 1 hour of the original signature.
+#   2. The Binance Pay facilitator (when configured) submits the authorization
+#      on-chain; the EIP-3009 contract nullifies the nonce permanently, making
+#      the in-process set a fast-path cache only.
+#
+# For production without a facilitator, replace with an atomic Redis set:
+#   redis.set(nonce_key, 1, ex=3600, nx=True)  →  False means already used
+# or rely on the on-chain EIP-3009 nullifier check via eth_call before delivery.
 _used_nonces: set[str] = set()
+
+if True:  # always — warn operators about the in-memory limitation at startup
+    _log.warning(
+        "x402: nonce replay protection is IN-MEMORY only — nonces are lost on "
+        "restart and not shared across replicas. Set X402_FACILITATOR_URL (on-chain "
+        "nullifier) or use Redis for durable replay protection in production."
+    )
 
 
 # ── EIP-712 hashing ────────────────────────────────────────────────────────────

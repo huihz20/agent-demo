@@ -62,23 +62,48 @@ logger = logging.getLogger("seller-agent.x402")
 # Binance Pay x402 facilitator endpoint.
 # When set, the agent POSTs the signed proof here after local verification;
 # the facilitator executes the on-chain transferWithAuthorization and returns
-# a transaction hash. When unset, the agent runs in demo mode (signature-only,
-# no actual token transfer).
+# a transaction hash.
 FACILITATOR_URL = os.environ.get("X402_FACILITATOR_URL", "").rstrip("/")
+
+# Demo / local-dev mode — explicit opt-in required.
+# Set X402_DEMO_MODE=1 ONLY for local testing when no facilitator is available.
+# In demo mode the EIP-712 signature is verified but NO token is transferred.
+# NEVER set this in production — any user could receive paid analysis for free.
+X402_DEMO_MODE = os.environ.get("X402_DEMO_MODE", "").strip().lower() in ("1", "true", "yes")
+
+if not FACILITATOR_URL and not X402_DEMO_MODE:
+    logger.warning(
+        "x402: SECURITY — neither X402_FACILITATOR_URL nor X402_DEMO_MODE is set. "
+        "The paid /x402/analyze endpoint will REJECT all requests until one is configured. "
+        "For local testing: export X402_DEMO_MODE=1. "
+        "For production:    export X402_FACILITATOR_URL=https://pay.binance.com/x402/v1"
+    )
+elif X402_DEMO_MODE:
+    logger.warning(
+        "x402: DEMO MODE active (X402_DEMO_MODE=1) — EIP-712 signatures are verified "
+        "but NO on-chain token transfer is executed. Never use this in production."
+    )
 
 
 async def _settle_via_facilitator(proof_b64: str) -> tuple[bool, str]:
     """Call Binance Pay x402 facilitator to execute on-chain settlement.
 
     Returns (True, txHash) on success, (False, error_reason) on failure.
-    In demo mode (FACILITATOR_URL unset) returns (True, "") immediately.
+
+    Security: when FACILITATOR_URL is unset and X402_DEMO_MODE is not explicitly
+    enabled, we FAIL CLOSED rather than silently skip settlement — preventing
+    unpaid access to analysis in misconfigured or partially-deployed environments.
     """
     if not FACILITATOR_URL:
-        logger.info(
-            "x402: X402_FACILITATOR_URL not set — demo mode "
-            "(signature verified, no on-chain transfer)"
+        if X402_DEMO_MODE:
+            logger.warning(
+                "x402: demo mode — EIP-712 sig OK but no on-chain transfer (X402_DEMO_MODE=1)"
+            )
+            return True, "demo"
+        return False, (
+            "payment not settled: X402_FACILITATOR_URL is not configured. "
+            "For local testing set X402_DEMO_MODE=1; for production set X402_FACILITATOR_URL."
         )
-        return True, ""
 
     try:
         raw   = base64.b64decode(proof_b64.strip())
