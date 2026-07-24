@@ -36,6 +36,7 @@ mandates inbound auth (see agent_card.py + ``bag deploy provision-cognito``).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -348,10 +349,19 @@ async def _stream_runner(
 
     Yields:
       ("progress", {"stage": "collecting", "tool": <name>, "message": ...})
+      ("progress", {"stage": "thinking",   "message": "..."})   ← heartbeat
       ("progress", {"stage": "generating", "message": "Rendering report..."})
       ("report",   {"content": <markdown>, "format": "markdown"})
       ("done",     {})
+
+    The ADK runner is executed in a background task feeding an asyncio.Queue.
+    Every HEARTBEAT_S seconds of silence we yield a "thinking" progress event
+    so the SSE connection stays alive during the long final-generation phase
+    (Kimi K2.6 can take 3–10 min to emit the full structured JSON).
+    Without this, Node.js undici's bodyTimeout kills the stream with "terminated".
     """
+    HEARTBEAT_S = 15
+
     session_service = runner.session_service
     existing = await session_service.get_session(
         app_name=runner.app_name, user_id="service", session_id=session_id
@@ -364,23 +374,55 @@ async def _stream_runner(
     user_msg = gtypes.Content(role="user", parts=[gtypes.Part(text=prompt)])
     parts: list[str] = []
 
-    async for event in runner.run_async(
-        user_id="service", session_id=session_id, new_message=user_msg
-    ):
-        if event.content:
-            for part in event.content.parts:
-                fn_call = getattr(part, "function_call", None)
-                if fn_call:
-                    tool_name = getattr(fn_call, "name", str(fn_call))
-                    yield "progress", {
-                        "stage": "collecting",
-                        "tool": tool_name,
-                        "message": f"Running {tool_name}...",
-                    }
-        if event.is_final_response() and event.content:
-            for p in event.content.parts:
-                if p.text and not getattr(p, "thought", False):
-                    parts.append(p.text)
+    queue: asyncio.Queue[tuple[str, object]] = asyncio.Queue()
+
+    async def _run():
+        try:
+            async for event in runner.run_async(
+                user_id="service", session_id=session_id, new_message=user_msg
+            ):
+                await queue.put(("event", event))
+        except Exception as exc:  # noqa: BLE001
+            await queue.put(("exc", exc))
+        finally:
+            await queue.put(("done", None))
+
+    task = asyncio.create_task(_run())
+    try:
+        while True:
+            try:
+                kind, payload = await asyncio.wait_for(queue.get(), timeout=HEARTBEAT_S)
+            except asyncio.TimeoutError:
+                yield "progress", {"stage": "thinking", "message": "Generating analysis..."}
+                continue
+
+            if kind == "done":
+                break
+            if kind == "exc":
+                raise payload  # type: ignore[misc]
+
+            # kind == "event"
+            event = payload
+            if event.content:
+                for part in event.content.parts:
+                    fn_call = getattr(part, "function_call", None)
+                    if fn_call:
+                        tool_name = getattr(fn_call, "name", str(fn_call))
+                        yield "progress", {
+                            "stage": "collecting",
+                            "tool": tool_name,
+                            "message": f"Running {tool_name}...",
+                        }
+            if event.is_final_response() and event.content:
+                for p in event.content.parts:
+                    if p.text and not getattr(p, "thought", False):
+                        parts.append(p.text)
+    finally:
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
 
     raw = "\n".join(parts).strip()
 
