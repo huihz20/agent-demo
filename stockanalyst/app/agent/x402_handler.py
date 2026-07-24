@@ -52,7 +52,9 @@ import httpx
 
 from x402_verify import (
     CHAIN_ID, MIN_PRICE_WEI, PRICE_WEI, SELLER_WALLET, U_TOKEN_BSC_TESTNET,
+    FREE_TIER_LIMIT,
     build_payment_challenge, verify_payment_proof,
+    build_free_payment_challenge, verify_free_payment_proof,
 )
 
 logger = logging.getLogger("seller-agent.x402")
@@ -139,10 +141,12 @@ class X402Handler:
         *,
         stream_work: Callable[..., AsyncGenerator[tuple[str, dict], None]],
         generator: str,
+        free_stream_work: Callable[..., AsyncGenerator[tuple[str, dict], None]] | None = None,
     ) -> None:
         self._inner = app
         self._stream_work = stream_work
         self._generator = generator
+        self._free_stream_work = free_stream_work
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] != "http" or not scope.get("path", "").startswith("/x402"):
@@ -158,11 +162,17 @@ class X402Handler:
             await self._handle_challenge(scope, send)
         elif path == "/x402/analyze" and method == "POST":
             await self._handle_analyze(scope, receive, send)
+        elif path == "/x402/free" and method == "GET":
+            await self._handle_free_challenge(scope, send)
+        elif path == "/x402/free" and method == "POST":
+            await self._handle_free(scope, receive, send)
         else:
             await _send_json(send, 404, {"error": "not found", "x402_routes": [
                 "GET  /x402/price",
                 "GET  /x402/analyze?symbols=AAPL,NVDA",
-                "POST /x402/analyze  (+ X-Payment header)",
+                "POST /x402/analyze  (+ X-Payment header)  → paid, 1.0 U, full report",
+                "GET  /x402/free?symbol=AAPL",
+                "POST /x402/free     (+ X-Payment header)  → free, 0 U, quick quote",
             ]})
 
     # ── Route handlers ─────────────────────────────────────────────────────────
@@ -341,6 +351,136 @@ class X402Handler:
             await _emit("error", {"message": str(exc)})
 
         # End stream
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    async def _handle_free_challenge(self, scope, send) -> None:
+        """GET /x402/free?symbol=AAPL — return 402 free tier challenge (0 U)."""
+        qs = urllib.parse.parse_qs((scope.get("query_string") or b"").decode())
+        symbol = ((qs.get("symbol") or qs.get("symbols") or [""])[0]).strip().upper()
+        host = _host(scope)
+        challenge = build_free_payment_challenge(symbol, host)
+        challenge_json = json.dumps(challenge).encode()
+        await send({
+            "type": "http.response.start",
+            "status": 402,
+            "headers": [
+                (b"x-payment-required", challenge_json),
+                (b"content-type", b"application/json"),
+            ],
+        })
+        body = json.dumps({
+            "error": "Payment Required",
+            "description": (
+                "Sign a 0-U EIP-712 authorization to prove your wallet identity, "
+                f"then POST to /x402/free. Rate limit: {FREE_TIER_LIMIT}/24h per wallet."
+            ),
+            "paymentRequired": challenge,
+        }).encode()
+        await send({"type": "http.response.body", "body": body, "more_body": False})
+
+    async def _handle_free(self, scope, receive, send) -> None:
+        """POST /x402/free — verify 0-U EIP-712 proof + rate limit + stream quick quote."""
+        if not self._free_stream_work:
+            await _send_json(send, 501, {"error": "free tier not configured"})
+            return
+
+        chunks: list[bytes] = []
+        while True:
+            msg = await receive()
+            if msg["type"] == "http.request":
+                chunks.append(msg.get("body") or b"")
+                if not msg.get("more_body"):
+                    break
+
+        try:
+            req: dict[str, Any] = json.loads(b"".join(chunks)) if chunks else {}
+        except json.JSONDecodeError:
+            await _send_json(send, 400, {"error": "invalid JSON body"})
+            return
+
+        # Accept "symbol" (singular) or "symbols" (list/string, first element)
+        symbol_raw = req.get("symbol") or ""
+        if not symbol_raw:
+            syms = _parse_symbols(req.get("symbols") or "")
+            symbol_raw = syms[0] if syms else ""
+        symbol = str(symbol_raw).strip().upper()
+        if not symbol:
+            await _send_json(send, 400, {
+                "error": "symbol is required",
+                "example": '{"symbol": "AAPL"}',
+            })
+            return
+
+        headers_dict: dict[bytes, bytes] = dict(scope.get("headers") or [])
+        payment_header = (headers_dict.get(b"x-payment") or b"").decode().strip()
+
+        if not payment_header:
+            host = _host(scope)
+            challenge = build_free_payment_challenge(symbol, host)
+            challenge_json = json.dumps(challenge).encode()
+            await send({
+                "type": "http.response.start",
+                "status": 402,
+                "headers": [
+                    (b"x-payment-required", challenge_json),
+                    (b"content-type", b"application/json"),
+                ],
+            })
+            body = json.dumps({
+                "error": "Payment Required",
+                "description": "Retry with a valid X-Payment header (0 U EIP-712 signature).",
+                "paymentRequired": challenge,
+            }).encode()
+            await send({"type": "http.response.body", "body": body, "more_body": False})
+            return
+
+        ok, msg, from_addr = verify_free_payment_proof(payment_header)
+        if not ok:
+            logger.warning("x402 free tier rejected for %s: %s", symbol, msg)
+            await _send_json(send, 402, {
+                "error": "Free tier access denied",
+                "detail": msg,
+            })
+            return
+
+        logger.info("x402 free tier: streaming quote for %s (from=%s, %s)", symbol, from_addr, msg)
+        await self._stream_free_sse(send, symbol, from_addr, msg)
+
+    async def _stream_free_sse(
+        self, send, symbol: str, from_addr: str, rate_msg: str,
+    ) -> None:
+        """Stream SSE events for the free quick-quote tier."""
+        await send({
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [
+                (b"content-type", b"text/event-stream; charset=utf-8"),
+                (b"cache-control", b"no-cache"),
+                (b"x-accel-buffering", b"no"),
+                (b"transfer-encoding", b"chunked"),
+            ],
+        })
+
+        async def _emit(event: str, data: dict) -> None:
+            frame = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+            await send({
+                "type": "http.response.body",
+                "body": frame.encode("utf-8"),
+                "more_body": True,
+            })
+
+        try:
+            await _emit("progress", {
+                "stage": "starting",
+                "symbol": symbol,
+                "message": f"Fetching quote for {symbol}... ({rate_msg})",
+            })
+            async for event_name, data in self._free_stream_work(symbol):
+                await _emit(event_name, data)
+        except Exception as exc:
+            logger.exception("x402 free SSE delivery failed for %s", symbol)
+            await _emit("error", {"message": str(exc)})
+
         await send({"type": "http.response.body", "body": b"", "more_body": False})
 
 

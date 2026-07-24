@@ -231,8 +231,8 @@ def verify_payment_proof(proof_header: str) -> tuple[bool, str]:
         return False, "authorization not yet valid"
     if now > valid_before:
         return False, "authorization expired"
-    if valid_before - valid_after > 3600:
-        return False, "authorization TTL exceeds 1 hour"
+    if valid_before - now > 3600:
+        return False, "authorization valid for more than 1 hour from now"
     if not sig.startswith("0x"):
         return False, "signature must be a 0x-prefixed hex string"
 
@@ -263,3 +263,133 @@ def verify_payment_proof(proof_header: str) -> tuple[bool, str]:
         from_addr, value / 1e18, nonce_hex,
     )
     return True, ""
+
+
+# ── Free tier ──────────────────────────────────────────────────────────────────
+
+FREE_TIER_LIMIT  = 10     # calls per wallet per FREE_TIER_WINDOW
+FREE_TIER_WINDOW = 86400  # seconds (24 h)
+
+# Sliding-window call log per wallet.  In-memory; resets on restart.
+# Replace with Redis ZRANGEBYSCORE / ZADD / ZREMRANGEBYSCORE for persistence.
+_free_tier_calls: dict[str, list[float]] = {}
+
+
+def _check_free_rate_limit(from_addr: str) -> tuple[bool, str]:
+    now   = time.time()
+    calls = [t for t in _free_tier_calls.get(from_addr, []) if now - t < FREE_TIER_WINDOW]
+    if len(calls) >= FREE_TIER_LIMIT:
+        secs = int(min(calls) + FREE_TIER_WINDOW - now)
+        h, m = divmod(secs // 60, 60)
+        return False, f"free tier rate limit: {FREE_TIER_LIMIT}/24h exceeded; resets in {h}h {m:02d}m"
+    calls.append(now)
+    _free_tier_calls[from_addr] = calls
+    return True, f"{FREE_TIER_LIMIT - len(calls)} uses remaining today"
+
+
+def build_free_payment_challenge(symbol: str, host: str = "localhost:9000") -> dict:
+    """Return x402 v2 free tier challenge (maxAmountRequired=0, wallet identity proof only)."""
+    desc = f"Free quick quote for {symbol.upper()}" if symbol else "Free quick quote"
+    return {
+        "x402Version": 2,
+        "accepts": [
+            {
+                "scheme":            "exact",
+                "network":           f"eip155:{CHAIN_ID}",
+                "maxAmountRequired": "0",
+                "asset":             U_TOKEN_BSC_TESTNET,
+                "payTo":             SELLER_WALLET.lower(),
+                "maxTimeoutSeconds": 600,
+                "extra": {
+                    "assetTransferMethod": "eip3009",
+                    "name":      _TOKEN_DOMAIN_NAME,
+                    "version":   _TOKEN_DOMAIN_VERSION,
+                    "tier":      "free",
+                    "rateLimit": f"{FREE_TIER_LIMIT}/24h",
+                    "description": desc,
+                },
+            }
+        ],
+        "error":    "Payment Required",
+        "resource": f"http://{host}/x402/free",
+    }
+
+
+def verify_free_payment_proof(proof_header: str) -> tuple[bool, str, str]:
+    """Verify x402 v2 EIP-712 free tier proof (value must be 0).
+
+    Returns (ok, message, from_addr).
+      ok=True  → message = "<N> uses remaining today";  from_addr = signer
+      ok=False → message = rejection reason;            from_addr = detected addr or ""
+    """
+    try:
+        raw   = base64.b64decode(proof_header.strip())
+        proof = json.loads(raw)
+    except Exception:
+        return False, "X-Payment is not valid base64 JSON", ""
+
+    if proof.get("x402Version") != 2:
+        return False, f"unsupported x402Version: {proof.get('x402Version')!r} (expected 2)", ""
+    if proof.get("scheme", "exact") != "exact":
+        return False, f"unsupported scheme: {proof.get('scheme')!r}", ""
+    network = proof.get("network", f"eip155:{CHAIN_ID}")
+    if network != f"eip155:{CHAIN_ID}":
+        return False, f"wrong network: {network!r} (expected eip155:{CHAIN_ID})", ""
+
+    payload = proof.get("payload") or {}
+    auth    = payload.get("authorization") or {}
+    sig     = str(payload.get("signature") or "")
+
+    from_addr    = str(auth.get("from",        "")).lower()
+    to_addr      = str(auth.get("to",          "")).lower()
+    value_raw    = str(auth.get("value",       "0"))
+    valid_after  = int(auth.get("validAfter",  0))
+    valid_before = int(auth.get("validBefore", 0))
+    nonce_hex    = str(auth.get("nonce", "0x" + "00" * 32))
+
+    if not from_addr.startswith("0x") or len(from_addr) != 42:
+        return False, f"invalid from address: {from_addr!r}", ""
+    if to_addr != SELLER_WALLET.lower():
+        return False, f"wrong recipient: {to_addr!r} (expected {SELLER_WALLET.lower()!r})", from_addr
+    try:
+        value = int(value_raw)
+    except (ValueError, TypeError):
+        return False, f"invalid value: {value_raw!r}", from_addr
+    if value != 0:
+        return False, f"free tier requires value=0 (got {value / 1e18:.3f} U); use /x402/analyze for paid analysis", from_addr
+
+    now = int(time.time())
+    if now < valid_after:
+        return False, "authorization not yet valid", from_addr
+    if now > valid_before:
+        return False, "authorization expired", from_addr
+    if valid_before - now > 3600:
+        return False, "authorization valid for more than 1 hour from now", from_addr
+    if not sig.startswith("0x"):
+        return False, "signature must be a 0x-prefixed hex string", from_addr
+
+    nonce_key = f"{from_addr}:{nonce_hex}"
+    if nonce_key in _used_nonces:
+        return False, "nonce already used (replay blocked)", from_addr
+
+    try:
+        nonce_bytes = bytes.fromhex(nonce_hex.removeprefix("0x").zfill(64))
+        digest      = _eip712_digest(
+            from_addr, to_addr, value, valid_after, valid_before, nonce_bytes,
+        )
+        recovered = Account._recover_hash(digest, signature=sig)
+    except Exception as exc:
+        return False, f"EIP-712 verification error: {exc}", from_addr
+
+    if recovered.lower() != from_addr:
+        return False, (
+            f"signature mismatch: recovered {recovered.lower()!r} ≠ from {from_addr!r}"
+        ), from_addr
+
+    ok, msg = _check_free_rate_limit(from_addr)
+    if not ok:
+        return False, msg, from_addr
+
+    _used_nonces.add(nonce_key)
+    _log.info("x402 free tier accepted: from=%s nonce=%s (%s)", from_addr, nonce_hex, msg)
+    return True, msg, from_addr

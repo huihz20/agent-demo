@@ -1,13 +1,14 @@
 # Stock Analysis Agent — Buyer Client
 
-TypeScript buyer client for the [Stock Analysis Agent](../stockanalyst/README.md). Supports two payment channels — pick the one that fits your use case:
+TypeScript buyer client for the [Stock Analysis Agent](../stockanalyst/README.md). Supports three tiers — pick the one that fits your use case:
 
-| Channel | Command | Friction | Trust model |
-|---------|---------|----------|-------------|
-| **x402** (Binance Pay) | `npm run x402` | Low — 1 signature, 1 HTTP call | Off-chain |
-| **ERC-8183** (on-chain escrow) | `npm run dev` | Higher — 5 on-chain txs + polling | Trustless, dispute window |
+| Tier | Command | Cost | Settlement | Report | Speed |
+|------|---------|------|------------|--------|-------|
+| **x402 Free** | `npm run x402:free` | 0 U | none | quick quote table | ~1s |
+| **x402 Paid** (Binance Pay) | `npm run x402` | 1.0 U | Binance Pay facilitator | full analysis | 40–120s |
+| **ERC-8183** (on-chain escrow) | `npm run dev` | 1.0 U | trustless escrow | full analysis | 5–15 min |
 
-Both channels read the buyer's portfolio from a local **UOMP Memory Guard** and produce the same HTML + PDF report.
+The free tier proves wallet identity via a 0-U EIP-712 signature and is rate-limited to 10 requests per wallet per 24 hours. Both paid tiers read the buyer's portfolio from a local **UOMP Memory Guard** and produce the same HTML + PDF report.
 
 ---
 
@@ -95,20 +96,69 @@ UOMP_GUARD_TOKEN=your_guard_jwt_token
 
 ---
 
-## Quick start — x402 (recommended for local testing)
+## Quick start — x402 free tier (0 U, ~1s)
 
-x402 is the fastest path: one EIP-191 signature, one HTTP POST, SSE stream back. No gas, no polling.
+No LLM involved — the free tier calls `yfinance` directly and returns a markdown price table. Rate-limited to 10 requests per wallet per 24 hours.
+
+```bash
+# Terminal 1 — start agent
+cd ../stockanalyst/app/agent
+python main.py    # or: bag dev --agent-only
+
+# Terminal 2 — free quote
+cd buyer-client
+SYMBOL=AAPL npm run x402:free
+# or pass the symbol as an argument:
+npm run x402:free NVDA
+```
+
+Expected output:
+```
+════════════════════════════════════════════════════════════
+  x402 Free Tier — Quick Quote
+  Wallet:   0x1FF0…Fb67
+  Symbol:   AAPL
+  Payment:  0 U (wallet identity proof only)
+  Limit:    10 requests / 24 h per wallet
+════════════════════════════════════════════════════════════
+
+  ✓ EIP-712 proof signed (value = 0 U)
+  →  Fetching market data for AAPL...
+  ✓ Report received
+
+│ ## AAPL — Apple Inc.  |  Quick Quote  2026-07-24
+│
+│ | Metric         | Value                       |
+│ |----------------|-----------------------------|
+│ | Price          | USD 321.66                  |
+│ | Change         | -1.30%                      |
+│ | Market Cap     | 4.72T USD                   |
+│ | PE (TTM)       | 38.9x                       |
+│ | Forward PE     | 33.4x                       |
+│ | Analyst Target | USD 318.25 (-1.1% upside)   |
+│ | Consensus      | Buy                         |
+│ | Beta           | 1.10                        |
+│ | 52W Range      | USD 201.50 – USD 334.99     |
+│
+│ > Full analysis → Paid tier (1.0 U) via POST /x402/analyze
+
+  ✓ FREE TIER COMPLETE — 0 U · 1 signature · ~1s
+```
+
+## Quick start — x402 paid tier (1.0 U, SSE stream)
+
+One EIP-712 EIP-3009 signature, one HTTP POST, SSE stream back. No gas, no polling.
 
 **Terminal 1 — start the agent locally:**
 ```bash
-cd ../stockanalyst
-bag dev --agent-only         # starts agent on localhost:9000
+cd ../stockanalyst/app/agent
+python main.py
 ```
 
 **Terminal 2 — seed the UOMP Guard, then run the buyer:**
 ```bash
-cd ..                        # agent-demo root
-node guard-mock.mjs          # seed portfolio + risk profile into Guard
+cd ..
+node guard-mock.mjs      # seed portfolio + risk profile into Guard
 
 cd buyer-client
 npm run x402
@@ -128,33 +178,29 @@ Decrypting keystore...
 ════════════════════════════════════════════════════════════
   Stock Analysis Agent — x402 Buyer
   x402 endpoint: http://localhost:9000
-  Buyer:         0x8fD3…4a2B
+  Buyer:         0x1FF0…Fb67
   Symbols:       AAPL, NVDA
-  Payment:       x402 / EIP-191 signed (no on-chain tx)
+  Payment:       x402 v2 / EIP-712 EIP-3009 (Binance Pay facilitator)
   Delivery:      SSE stream (no polling needed)
 ════════════════════════════════════════════════════════════
 
 ────────────────────────────────────────────────────────────
-  Step 2: Sign x402 payment authorization (EIP-191, no on-chain tx)
+  Step 2: Sign x402 v2 payment authorization (EIP-712 EIP-3009)
 ────────────────────────────────────────────────────────────
-  ✓ Payment proof signed
+  ✓ EIP-712 proof signed (TransferWithAuthorization)
   ✓ Paying:   1.0 U → 0x1ff0…fb67
   ✓ Valid for: 10 minutes
 
 ────────────────────────────────────────────────────────────
   Step 3: POST /x402/analyze → streaming SSE report
 ────────────────────────────────────────────────────────────
-  (progress events below — full analysis takes 40–120s)
-
-  →  Starting analysis for AAPL, NVDA...
   ⟳  get_stock_quote
   ⟳  get_technical_signals
   ⟳  get_options_sentiment
   ⟳  get_insider_activity
   ⟳  get_news_sentiment
   ⟳  get_stock_quote          ← second symbol
-  ⟳  get_technical_signals
-  …
+  ·  Generating analysis.....
   ✎  Rendering report...
   ✓ Report received (21 840 chars)
 
@@ -214,8 +260,9 @@ bag erc8183 settle <job_id>
 
 ```
 src/
-├── index.ts        — ERC-8183 buyer entry point (npm run dev)
-├── x402.ts         — x402 buyer entry point     (npm run x402)
+├── x402free.ts     — free tier buyer    (npm run x402:free)  — 0 U, ~1s, no LLM
+├── x402.ts         — paid x402 buyer   (npm run x402)       — 1 U, SSE, EIP-712
+├── index.ts        — ERC-8183 buyer    (npm run dev)        — 1 U, on-chain escrow
 ├── erc8183.ts      — on-chain job lifecycle: createJob → fund → settle
 ├── negotiate.ts    — A2A JSON-RPC negotiate with OAuth2 support
 ├── uomp.ts         — UOMP Guard HTTP client + buildTaskFromMemory()
@@ -228,62 +275,85 @@ src/
 
 ## Payment channels explained
 
-### x402 — Binance Pay facilitator
+### x402 free tier — wallet identity proof (0 U)
+
+```
+Buyer                              Agent (localhost:9000)
+  │                                        │
+  │  POST /x402/free                       │
+  │  {"symbol": "AAPL"}                    │
+  │  X-Payment: base64(0-U proof)  ───────▶│
+  │                                        │  verify_free_payment_proof()
+  │                                        │  value must = 0, rate limit 10/24h
+  │                                        │  fetch_quote("AAPL")  — no LLM
+  │◀── event: progress ────────────────────│
+  │◀── event: report   ────────────────────│  markdown price table
+  │◀── event: done     ────────────────────│
+```
+
+### x402 paid tier — Binance Pay facilitator (1.0 U)
 
 ```
 Buyer                              Agent (localhost:9000)
   │                                        │
   │  POST /x402/analyze                    │
-  │  Content-Type: application/json        │
-  │  X-Payment: base64(JSON proof)  ──────▶│
+  │  {"symbols": ["AAPL","NVDA"], ...}     │
+  │  X-Payment: base64(1-U proof)  ───────▶│
   │                                        │  verify_payment_proof()  ← fixed code
-  │                                        │  (sig + amount + recipient + nonce)
+  │                                        │  Binance Pay facilitator → on-chain tx
   │◀── event: progress ────────────────────│  per tool-call progress
-  │◀── event: progress ────────────────────│
+  │◀── event: progress (thinking·····) ───│  SSE heartbeat (keeps connection alive)
   │◀── event: report   ────────────────────│  full markdown report
   │◀── event: done     ────────────────────│
 ```
 
-The `X-Payment` header carries a base64-encoded JSON proof. The `x402.ts` client builds and signs it automatically:
+Both tiers use **x402 v2 / EIP-712 EIP-3009 (TransferWithAuthorization)**. The client signs structured typed data; no `eth_sign` / `personal_sign` involved:
 
 ```typescript
-// Signing message (EIP-191 personal_sign via ethers.js signMessage):
-const msg =
-  `x402:stockanalyst:v1:${auth.from}:${auth.to}:${auth.value}` +
-  `:${auth.validAfter}:${auth.validBefore}:${auth.nonce}`;
-const sig = await wallet.signMessage(msg);
+// ethers v6 signTypedData — domain matches the U token contract on BSC Testnet
+const sig = await wallet.signTypedData(
+  { name: "U", version: "1", chainId: 97,
+    verifyingContract: "0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565" },
+  { TransferWithAuthorization: [
+      { name: "from",        type: "address" },
+      { name: "to",          type: "address" },
+      { name: "value",       type: "uint256" },  // 0 (free) or 1e18 (paid)
+      { name: "validAfter",  type: "uint256" },
+      { name: "validBefore", type: "uint256" },
+      { name: "nonce",       type: "bytes32" },
+    ]},
+  { from, to, value: BigInt(priceWei), validAfter: 0n,
+    validBefore: BigInt(now + 600), nonce }
+);
 
-// Proof structure:
+// x402 v2 wire format
 const proof = {
-  scheme: "exact",
-  network: "bsc-testnet",
-  payload: {
-    authorization: {
-      from:        "0x<buyer-address>",
-      to:          "0x1ff095e1c5cf4bc72a3dc54be17b6cf85043fb67",  // seller
-      value:       "1000000000000000000",   // 1.0 U in wei (min 0.5 U)
-      validAfter:  0,
-      validBefore: <unix-timestamp>,        // 10-minute TTL
-      nonce:       "0x<random-8-bytes>",    // replay protection
-    },
-    signature: "0x<65-byte EIP-191 sig>",
-  },
+  x402Version: 2, scheme: "exact", network: "eip155:97",
+  payload: { signature: sig, authorization: { from, to, value, validAfter, validBefore, nonce } },
 };
-// Header value: Buffer.from(JSON.stringify(proof)).toString("base64")
+// X-Payment header: Buffer.from(JSON.stringify(proof)).toString("base64")
 ```
 
-The agent checks: signature valid, `to` == seller wallet, `value` ≥ 0.5 U, not expired, nonce not reused. Each nonce can only be used once per agent process (in-memory replay protection).
+The agent verifies: EIP-712 signature recovers to `from`, `to` == seller wallet, `value` ≥ 0.5 U (paid) or == 0 (free), not expired, nonce not reused.
 
-**To call from any HTTP client (curl example):**
+**curl example:**
 ```bash
-# 1. Get payment challenge
-curl "http://localhost:9000/x402/analyze?symbols=AAPL"
+# Get price / challenge
+curl http://localhost:9000/x402/price
+curl "http://localhost:9000/x402/free?symbol=AAPL"
+curl "http://localhost:9000/x402/analyze?symbols=AAPL,NVDA"
 
-# 2. Generate proof with the script in x402_verify.py docstring, then:
+# Stream analysis (generate proof with the script in x402_verify.py docstring)
 curl -N -X POST http://localhost:9000/x402/analyze \
   -H "Content-Type: application/json" \
   -H "X-Payment: <base64-proof>" \
   -d '{"symbols": ["AAPL", "NVDA"]}'
+
+# Free quick quote
+curl -N -X POST http://localhost:9000/x402/free \
+  -H "Content-Type: application/json" \
+  -H "X-Payment: <base64-0u-proof>" \
+  -d '{"symbol": "AAPL"}'
 ```
 
 ### ERC-8183 — on-chain trustless escrow
