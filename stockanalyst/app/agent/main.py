@@ -41,6 +41,7 @@ import logging
 import os
 import re
 import sys
+from typing import AsyncGenerator
 
 from google.adk.agents import Agent
 from google.adk.runners import InMemoryRunner
@@ -276,6 +277,16 @@ async def _call_runner(prompt: str, session_id: str) -> str:
     return "\n".join(parts).strip()
 
 
+def _try_parse_report(text: str) -> StockReport | None:
+    """Extract + parse + validate the StockReport JSON from LLM text. Returns None on failure."""
+    try:
+        json_str = _extract_json(text)
+        return StockReport.model_validate_json(json_str)
+    except Exception as exc:
+        _log.warning("report parse/validation failed: %s", exc)
+        return None
+
+
 async def _run_llm(
     prompt: str,
     *,
@@ -296,15 +307,7 @@ async def _run_llm(
     """
     raw = await _call_runner(prompt, session_id)
 
-    def _try_parse(text: str) -> StockReport | None:
-        try:
-            json_str = _extract_json(text)
-            return StockReport.model_validate_json(json_str)
-        except Exception as exc:
-            _log.warning("report parse/validation failed: %s", exc)
-            return None
-
-    report = _try_parse(raw)
+    report = _try_parse_report(raw)
 
     if report is None:
         # Retry: ask the model to fix its output in the same session
@@ -315,7 +318,7 @@ async def _run_llm(
             "Ensure the analyses array has one entry per symbol and all required fields are present."
         )
         raw2 = await _call_runner(correction, session_id)
-        report = _try_parse(raw2)
+        report = _try_parse_report(raw2)
 
     if report is None:
         _log.error("structured output failed after retry (session %s); delivering raw text", session_id)
@@ -330,6 +333,73 @@ async def _run_llm(
             # Deliver what we have — partial is better than nothing
 
     return render_report(report)
+
+
+async def _stream_runner(
+    prompt: str,
+    session_id: str,
+    symbols: list[str] | None = None,
+) -> AsyncGenerator[tuple[str, dict], None]:
+    """Async generator for SSE streaming: yields (event_name, data) tuples.
+
+    Used by the x402 channel (X402Handler) to push live progress events and
+    the final rendered report over a single HTTP connection. Not used by the
+    ERC-8183 A2A path (which delivers async via submit_result on-chain).
+
+    Yields:
+      ("progress", {"stage": "collecting", "tool": <name>, "message": ...})
+      ("progress", {"stage": "generating", "message": "Rendering report..."})
+      ("report",   {"content": <markdown>, "format": "markdown"})
+      ("done",     {})
+    """
+    session_service = runner.session_service
+    existing = await session_service.get_session(
+        app_name=runner.app_name, user_id="service", session_id=session_id
+    )
+    if existing is None:
+        await session_service.create_session(
+            app_name=runner.app_name, user_id="service", session_id=session_id
+        )
+
+    user_msg = gtypes.Content(role="user", parts=[gtypes.Part(text=prompt)])
+    parts: list[str] = []
+
+    async for event in runner.run_async(
+        user_id="service", session_id=session_id, new_message=user_msg
+    ):
+        if event.content:
+            for part in event.content.parts:
+                fn_call = getattr(part, "function_call", None)
+                if fn_call:
+                    tool_name = getattr(fn_call, "name", str(fn_call))
+                    yield "progress", {
+                        "stage": "collecting",
+                        "tool": tool_name,
+                        "message": f"Running {tool_name}...",
+                    }
+        if event.is_final_response() and event.content:
+            for p in event.content.parts:
+                if p.text and not getattr(p, "thought", False):
+                    parts.append(p.text)
+
+    raw = "\n".join(parts).strip()
+
+    yield "progress", {"stage": "generating", "message": "Rendering report..."}
+
+    report = _try_parse_report(raw)
+    if report is None:
+        # Fallback: deliver raw text (buyer still gets something)
+        _log.warning("x402 stream: structured parse failed; delivering raw text (session %s)", session_id)
+        yield "report", {"content": raw, "format": "text"}
+    else:
+        if symbols:
+            returned = {a.symbol.upper() for a in report.analyses}
+            missing = [s for s in symbols if s.upper() not in returned]
+            if missing:
+                _log.warning("x402 stream: missing analyses for %s (session %s)", missing, session_id)
+        yield "report", {"content": render_report(report), "format": "markdown"}
+
+    yield "done", {}
 
 
 def _default_network() -> str:
@@ -472,6 +542,18 @@ if __name__ == "__main__":
                     await send({"type": "http.response.body", "body": b"not found"})
                 return
         await _inner(scope, receive, send)
+
+    # --- x402 / Binance Pay channel -------------------------------------------
+    # Mount the x402 handler as the outermost ASGI layer so it intercepts
+    # /x402/* before the A2A server, the ERC-8183 local-storage route, and
+    # the JSON-RPC error-hardening middleware. Payment verification and SSE
+    # streaming are fixed code — the LLM sees only the analysis prompt.
+    from x402_handler import X402Handler
+    _app = X402Handler(
+        _app,
+        stream_work=_stream_runner,
+        generator=GENERATOR,
+    )
 
     uvicorn.run(
         _app,
